@@ -79,16 +79,21 @@ test('rich hosts receive a three-row responsive view with narrow controls intact
   assert.equal(controlNode(narrow, '⏮').props.width, 3)
   assert.equal(controlNode(narrow, '▶').props.width, 3)
   assert.equal(controlNode(narrow, '⏭').props.width, 3)
+  assertTrailingClose(narrow)
   assert.doesNotMatch(narrowText, /12:34:56/u)
   assert.doesNotMatch(narrowText, /┌────┐/u)
 
-  const mediumText = textOf(createRenderer(60).render(fixture.descriptor.component))
+  const medium = createRenderer(60).render(fixture.descriptor.component)
+  const mediumText = textOf(medium)
   assert.match(mediumText, /┌────┐/u)
   assert.match(mediumText, /1:02:03 .* 12:34:56/u)
   assert.doesNotMatch(mediumText, /Live at RiNG/u)
+  assertTrailingClose(medium)
 
-  const wideText = textOf(createRenderer(120).render(fixture.descriptor.component))
+  const wide = createRenderer(120).render(fixture.descriptor.component)
+  const wideText = textOf(wide)
   assert.match(wideText, /Live at RiNG/u)
+  assertTrailingClose(wide)
   fixture.presenter.dispose()
 })
 
@@ -105,6 +110,7 @@ test('80, 96, and 120 columns render bounded spectra while narrow bars release t
   const narrow = renderer.render(fixture.descriptor.component)
   assert.equal(findNode(narrow, node => node.type === 'Box' && node.props.width === 24), undefined)
   assert.equal(fixture.events.includes('start spectrum'), false)
+  assertTrailingClose(narrow)
 
   for (const [columns, cells] of [[80, 12], [96, 18], [120, 24]]) {
     renderer.resize(columns)
@@ -120,6 +126,14 @@ test('80, 96, and 120 columns render bounded spectra while narrow bars release t
       '█'.repeat(cells),
       '█'.repeat(cells),
     ])
+    assert.deepEqual(spectrum.children.map(node => node.props.color), [
+      'rainbow_blue_shimmer',
+      'rainbow_blue',
+      'claude',
+    ])
+    assert.deepEqual(spectrum.children.map(node => node.props.dimColor), [false, false, false])
+    const trailingClose = assertTrailingClose(tree)
+    assert.equal(tree.children.indexOf(spectrum) < tree.children.indexOf(trailingClose), true)
     assert.match(textOf(tree), /⏮.*▶.*⏭.*×/u)
   }
 
@@ -128,6 +142,14 @@ test('80, 96, and 120 columns render bounded spectra while narrow bars release t
   fixture.emitSpectrum({ ...frame, bins: [...frame.bins] })
   assert.equal(updates, 0, 'identical frames should not redraw the status tree')
   unsubscribe()
+
+  fixture.emitSpectrum({ ...frame, playing: false })
+  const pausedTree = renderer.render(fixture.descriptor.component)
+  const pausedSpectrum = findNode(pausedTree, node => node.type === 'Box'
+    && node.props.width === 24
+    && node.props.height === 3)
+  assert(pausedSpectrum)
+  assert.deepEqual(pausedSpectrum.children.map(node => node.props.dimColor), [true, true, true])
 
   renderer.resize(79)
   renderer.render(fixture.descriptor.component)
@@ -502,9 +524,20 @@ function textOf(node) {
 }
 
 function controlNode(tree, label) {
-  const found = findNode(tree, node => node.type === 'Box' && textOf(node) === label)
+  const found = findNode(tree, node => node.type === 'Box'
+    && (node.children ?? []).some(child => child?.type === 'Text' && textOf(child) === label))
   assert(found, `control ${label} should exist`)
   return found
+}
+
+function assertTrailingClose(tree) {
+  const close = tree.children.at(-1)
+  assert(close, 'music bar should end with a close column')
+  assert.equal(close.type, 'Box')
+  assert.equal(close.props.width, 3)
+  assert.equal(close.props.height, 3)
+  assert.equal(textOf(close), '×')
+  return close
 }
 
 function progressNode(tree) {

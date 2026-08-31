@@ -18,6 +18,11 @@ const STATUS_KEY = 'dsh-music-tui:playback'
 const LOCAL_TICK_MS = 1000
 const CONTROL_ERROR_MS = 4000
 const CONTROL_WIDTH = 3
+const SPECTRUM_ROW_COLORS = [
+  'rainbow_blue_shimmer',
+  'rainbow_blue',
+  'claude',
+] as const
 
 type MusicPendingOperation = YpmControlCommand | 'seek'
 type MusicHoverTarget = YpmControlCommand | 'seek' | 'close'
@@ -518,27 +523,8 @@ function createMusicBarView(
           ? progressNode(React, ui, state, layout.progressCells, hovered, setHovered, actions)
           : null,
         React.createElement(ui.Box, { flexGrow: 1, minWidth: 0 }),
-        React.createElement(
-          ui.Box,
-          {
-            onClick: actions.close,
-            onMouseEnter: () => setHovered('close'),
-            onMouseLeave: () => setHovered(undefined),
-            backgroundColor: hovered === 'close' ? 'userMessageBackgroundHover' : undefined,
-            flexShrink: 0,
-            width: CONTROL_WIDTH,
-            alignItems: 'center',
-            justifyContent: 'center',
-          },
-          React.createElement(
-            ui.Text,
-            { dimColor: hovered !== 'close', bold: hovered === 'close' },
-            controlGlyph(snapshot.iconStyle, 'close'),
-          ),
-        ),
       ),
     )
-    if (!layout.showCover && spectrum === null) return body
     return React.createElement(
       ui.Box,
       { flexDirection: 'row', width: '100%', height: 3 },
@@ -547,6 +533,8 @@ function createMusicBarView(
       body,
       spectrum === null ? null : React.createElement(ui.Box, { width: 1, flexShrink: 0 }),
       spectrum,
+      spectrum === null ? null : React.createElement(ui.Box, { width: 1, flexShrink: 0 }),
+      closeNode(React, ui, snapshot.iconStyle, hovered, setHovered, actions.close),
     )
   }
 }
@@ -579,12 +567,51 @@ function spectrumNode(
       ui.Text,
       {
         key: `spectrum-${index}`,
-        color: 'suggestion',
+        color: SPECTRUM_ROW_COLORS[index] ?? 'claude',
         dimColor: !frame.playing,
         wrap: 'truncate',
       },
       row,
     )),
+  )
+}
+
+function closeNode(
+  React: StatusViewReact,
+  ui: StatusViewUi,
+  iconStyle: YpmSnapshot['iconStyle'],
+  hovered: MusicHoverTarget | undefined,
+  setHovered: (value: MusicHoverTarget | undefined) => void,
+  close: () => void,
+): unknown {
+  return React.createElement(
+    ui.Box,
+    {
+      flexDirection: 'column',
+      justifyContent: 'flex-end',
+      width: CONTROL_WIDTH,
+      height: 3,
+      flexShrink: 0,
+    },
+    React.createElement(
+      ui.Box,
+      {
+        onClick: close,
+        onMouseEnter: () => setHovered('close'),
+        onMouseLeave: () => setHovered(undefined),
+        backgroundColor: hovered === 'close' ? 'userMessageBackgroundHover' : undefined,
+        width: CONTROL_WIDTH,
+        height: 1,
+        flexShrink: 0,
+        alignItems: 'center',
+        justifyContent: 'center',
+      },
+      React.createElement(
+        ui.Text,
+        { dimColor: hovered !== 'close', bold: hovered === 'close' },
+        controlGlyph(iconStyle, 'close'),
+      ),
+    ),
   )
 }
 
