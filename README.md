@@ -49,7 +49,13 @@ ypm --version
 
 ## 安装
 
-当前 npm 包尚未发布。从仓库安装：
+使用包名安装：
+
+```sh
+dsh plugin --profile dsh-tui add @dsh-tui-ecosystem/music
+```
+
+从源码开发时，可以安装本地工作树：
 
 ```sh
 git clone https://github.com/Nagi-ovo/dsh-music-tui.git
@@ -57,12 +63,6 @@ cd dsh-music-tui
 pnpm install --frozen-lockfile
 pnpm build
 dsh plugin --profile dsh-tui add "$PWD"
-```
-
-发布到 npm 后，可以直接使用包名：
-
-```sh
-dsh plugin --profile dsh-tui add @dsh-tui-ecosystem/music
 ```
 
 先在另一个终端或后台启动 YesPlayMusic TUI，再启动 DSH：
@@ -74,6 +74,9 @@ dsh --profile dsh-tui
 不需要改 YesPlayMusic 源码，也不需要在 YesPlayMusic 仓库里安装插件。
 本插件不会替你启动或关闭 YesPlayMusic。
 
+音乐条的显示状态只属于当前 TUI。你在一个 TUI 里执行 `/music`，不会打开其他
+TUI 的音乐条；多个 TUI 的播放控制仍会操作同一个 YesPlayMusic TUI 实例。
+
 ## 配置
 
 默认配置已经写进 `cordis.patch.yml`：
@@ -82,8 +85,8 @@ dsh --profile dsh-tui
 | --- | --- | --- |
 | `executable` | `ypm` | CLI 名称或绝对路径 |
 | `showStatus` | `true` | 是否启用可由 `/music` 打开的音乐条；启动时仍保持隐藏 |
-| `pollIntervalMs` | `3000` | 在线轮询间隔（1000–60000 ms） |
-| `timeoutMs` | `3000` | 单次 CLI 硬超时（250–30000 ms） |
+| `pollIntervalMs` | `3000` | 在线轮询间隔（1000 至 60000 ms） |
+| `timeoutMs` | `3000` | 单次 CLI 硬超时（250 至 30000 ms） |
 | `spectrumStyle` | `follow` | `off` / `follow` / `blocks` / `led` / `braille` / `shade` |
 
 `showStatus: false` 不会注册音乐条；此时 `/music` 与 `/music show` 退化为一次性
@@ -125,7 +128,7 @@ dsh-TUI /music + status
 - 音乐条注册成功后默认每 3 秒读取一次状态；播放时每秒在本地推进显示进度，
   暂停时冻结。一次读取失败保留旧状态，连续两次失败才清除；离线后轮询退避。
 - 频谱只在音乐条可见、存在歌曲且终端至少 80 列时，通过公开的
-  `ypm --json --tui spectrum --fps 12` NDJSON 流订阅。协议固定为 32 个 0–255 bins；
+  `ypm --json --tui spectrum --fps 12` NDJSON 流订阅。协议固定为 32 个取值范围为 0 至 255 的 bins；
   不读取 PCM、不直连 socket，断流会清掉旧画面并有界退避重连，隐藏、变窄或卸载会中止子进程。
 - `follow` 只跟随 YPM 的 `blocks`、`led`、`braille`、`shade`；遇到其他样式安全回退为
   `blocks`。重复帧不会触发无意义的 TUI 重绘。
