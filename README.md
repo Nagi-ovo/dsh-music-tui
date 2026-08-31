@@ -44,18 +44,20 @@ ypm --version
 
 ## 安装
 
-dsh-TUI 已安装时：
+当前 npm 包尚未发布。从仓库安装：
+
+```sh
+git clone https://github.com/Nagi-ovo/dsh-music-tui.git
+cd dsh-music-tui
+pnpm install --frozen-lockfile
+pnpm build
+dsh plugin --profile dsh-tui add "$PWD"
+```
+
+发布到 npm 后，可以直接使用包名：
 
 ```sh
 dsh plugin --profile dsh-tui add @dsh-tui-ecosystem/music
-```
-
-新 profile 可以一次装两个直接 bundle：
-
-```sh
-dsh plugin --profile dsh-tui add \
-  @deepseek-harness-tui/dsh-tui \
-  @dsh-tui-ecosystem/music
 ```
 
 先在另一个终端或后台启动 YesPlayMusic TUI，再启动 DSH：
