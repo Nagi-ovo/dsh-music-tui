@@ -170,6 +170,60 @@ test('spectra grow on wide terminals while narrow bars release the stream', asyn
   assert.deepEqual(fixture.events.slice(-3), ['stop polling', 'stop spectrum', 'dispose view'])
 })
 
+test('stalled and offline players replace synthetic spectra with actionable status', async () => {
+  let now = 0
+  const stalled = {
+    ...snapshot,
+    playing: true,
+    positionMs: 0,
+    seekable: false,
+  }
+  const fixture = await richFixture({
+    snapshot: stalled,
+    spectrumStyle: 'blocks',
+    now: () => now,
+  })
+  const renderer = createRenderer(120)
+  renderer.render(fixture.descriptor.component)
+  fixture.emitSpectrum({
+    version: 1,
+    style: 'blocks',
+    playing: true,
+    bins: Array.from({ length: 32 }, () => 255),
+  })
+  assert(findNode(renderer.render(fixture.descriptor.component), node => node.type === 'Box'
+    && node.props.width === 24
+    && node.props.height === 3))
+
+  now = 3000
+  fixture.emitStatus(stalled)
+  assert.doesNotMatch(textOf(renderer.render(fixture.descriptor.component)), /not advancing/u)
+
+  now = 6000
+  fixture.emitStatus(stalled)
+  let tree = renderer.render(fixture.descriptor.component)
+  assert.match(textOf(tree), /YPM playback is not advancing; restart the player/u)
+  assert.equal(findNode(tree, node => node.type === 'Box'
+    && node.props.width === 24
+    && node.props.height === 3), undefined)
+  assert.equal(fixture.events.at(-1), 'stop spectrum')
+
+  now = 9000
+  fixture.emitStatus({ ...stalled, positionMs: 1000, seekable: true })
+  tree = renderer.render(fixture.descriptor.component)
+  assert.doesNotMatch(textOf(tree), /not advancing/u)
+  assert.equal(fixture.events.at(-1), 'start spectrum')
+  assert.equal(findNode(tree, node => node.type === 'Box'
+    && node.props.width === 24
+    && node.props.height === 3), undefined)
+
+  fixture.emitStatus(undefined)
+  tree = renderer.render(fixture.descriptor.component)
+  assert.match(textOf(tree), /YesPlayMusic TUI is not running/u)
+  assertTrailingClose(tree)
+  fixture.presenter.dispose()
+})
+
 test('spectrum off never opens a background stream', async () => {
   const fixture = await richFixture({ spectrumStyle: 'off' })
   createRenderer(120).render(fixture.descriptor.component)
@@ -199,6 +253,28 @@ test('a rejected rich-view registration returns the snapshot without polling', a
   assert.deepEqual(await presenter.show(), { snapshot, displayed: false })
   assert.deepEqual(events, ['register view', 'read status'])
   assert.equal(presenter.store.getSnapshot().snapshot, undefined)
+  presenter.dispose()
+})
+
+test('a failed initial status keeps the rich bar visible with an offline hint', async () => {
+  let descriptor
+  const presenter = new MusicBarPresenter({}, {
+    set() { return () => {} },
+    registerView(value) {
+      descriptor = value
+      return () => {}
+    },
+  }, {
+    startPolling() { return () => {} },
+    startSpectrum() { return () => {} },
+    async status() { throw new YpmError('process', 'offline') },
+  })
+
+  await assert.rejects(presenter.show(), error => error?.message === 'offline')
+  const tree = createRenderer(60).render(descriptor.component)
+  assert.match(textOf(tree), /YesPlayMusic TUI is not running/u)
+  assert.match(textOf(tree), /reconnect automatically/u)
+  assertTrailingClose(tree)
   presenter.dispose()
 })
 
@@ -450,6 +526,7 @@ async function richFixture(options = {}) {
   const presenter = new MusicBarPresenter(owner, status, controller, {
     ...(options.coverLoader === undefined ? {} : { coverLoader: options.coverLoader }),
     ...(options.spectrumStyle === undefined ? {} : { spectrumStyle: options.spectrumStyle }),
+    ...(options.now === undefined ? {} : { now: options.now }),
   })
   const showResult = await presenter.show()
   return {
@@ -459,6 +536,10 @@ async function richFixture(options = {}) {
     presenter,
     events,
     showResult,
+    emitStatus(value) {
+      assert(sink, 'status polling should be active')
+      sink(value)
+    },
     emitSpectrum(frame) {
       assert(spectrumSink, 'spectrum stream should be active')
       spectrumSink(frame)

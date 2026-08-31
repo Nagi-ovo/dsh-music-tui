@@ -37,6 +37,9 @@ and `shade` styles are built in, with an option to follow matching YPM styles.
 Control responses say that a command was sent, not that playback has already
 changed. The YesPlayMusic CLI acknowledgement only confirms receipt; the plugin
 then refreshes status instead of treating the acknowledgement as final state.
+The bar remains visible with a restart hint while the player is offline. If YPM
+claims to be playing while its remote position does not advance for six seconds,
+the bar suppresses the potentially synthetic spectrum and reconnects after recovery.
 
 ## Requirements
 
