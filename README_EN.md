@@ -29,13 +29,17 @@ When the host supports Kitty graphics, artwork is shown as a smooth image.
 Other terminals, inline and accessibility modes, and terminal multiplexers
 automatically use the same-size half-block thumbnail with no extra setup.
 The real audio spectrum is subscribed only at 80 columns or wider. It uses
-12/18/24 cells at 80/96/120 columns; narrowing releases this plugin's stream,
+12/18/24 cells at 80/96/120 columns, then adds one cell for every two columns
+up to 48 cells. Narrowing releases this plugin's stream,
 so YPM can stop the analyzer when its own spectrum is hidden. Compact `blocks`, `led`, `braille`,
 and `shade` styles are built in, with an option to follow matching YPM styles.
 
 Control responses say that a command was sent, not that playback has already
 changed. The YesPlayMusic CLI acknowledgement only confirms receipt; the plugin
 then refreshes status instead of treating the acknowledgement as final state.
+The bar remains visible with a restart hint while the player is offline. If YPM
+claims to be playing while its remote position does not advance for six seconds,
+the bar suppresses the potentially synthetic spectrum and reconnects after recovery.
 
 ## Requirements
 
@@ -53,21 +57,18 @@ ypm --version
 
 ## Installation
 
-The npm package has not been published yet. Install from a checkout for now:
+This release is distributed through GitHub Releases. Install the tagged
+checkout locally:
 
 ```sh
-git clone https://github.com/Nagi-ovo/dsh-music-tui.git
+git clone --branch v0.1.0 --depth 1 https://github.com/Nagi-ovo/dsh-music-tui.git
 cd dsh-music-tui
 pnpm install --frozen-lockfile
 pnpm build
 dsh plugin --profile dsh-tui add "$PWD"
 ```
 
-After the npm release, the package name can be used directly:
-
-```sh
-dsh plugin --profile dsh-tui add @dsh-tui-ecosystem/music
-```
+For development, omit `--branch v0.1.0 --depth 1` to use the latest branch.
 
 Start YesPlayMusic TUI in another terminal or in the background, then start DSH:
 
@@ -78,6 +79,10 @@ dsh --profile dsh-tui
 No YesPlayMusic source change or in-repository plugin installation is needed.
 This plugin never starts or stops YesPlayMusic for you.
 
+Bar visibility belongs to the current TUI. Running `/music` in one TUI does
+not open the bar in another; playback controls from every TUI still target the
+same YesPlayMusic TUI instance.
+
 ## Configuration
 
 `cordis.patch.yml` provides these defaults:
@@ -86,8 +91,8 @@ This plugin never starts or stops YesPlayMusic for you.
 | --- | --- | --- |
 | `executable` | `ypm` | CLI name or absolute path |
 | `showStatus` | `true` | Enable the bar opened by `/music`; it still starts hidden |
-| `pollIntervalMs` | `3000` | Online polling interval (1000–60000 ms) |
-| `timeoutMs` | `3000` | Hard deadline per CLI call (250–30000 ms) |
+| `pollIntervalMs` | `3000` | Online polling interval (1000 to 60000 ms) |
+| `timeoutMs` | `3000` | Hard deadline per CLI call (250 to 30000 ms) |
 | `spectrumStyle` | `follow` | `off` / `follow` / `blocks` / `led` / `braille` / `shade` |
 
 With `showStatus: false`, no bar is registered. `/music` and `/music show` then
@@ -137,7 +142,7 @@ dsh-TUI /music + status
 - The spectrum subscribes to the public
   `ypm --json --tui spectrum --fps 12` NDJSON stream only while the bar is
   visible, a track exists, and the terminal is at least 80 columns wide. The
-  protocol carries 32 bounded 0–255 bins, never PCM or a private socket.
+  protocol carries 32 bins bounded from 0 to 255, never PCM or a private socket.
   Disconnects clear stale pixels and reconnect with bounded backoff; hiding,
   narrowing, or unloading aborts the child process.
 - `follow` accepts YPM's `blocks`, `led`, `braille`, and `shade` names and

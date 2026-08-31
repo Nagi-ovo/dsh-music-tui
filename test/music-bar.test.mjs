@@ -79,20 +79,25 @@ test('rich hosts receive a three-row responsive view with narrow controls intact
   assert.equal(controlNode(narrow, '⏮').props.width, 3)
   assert.equal(controlNode(narrow, '▶').props.width, 3)
   assert.equal(controlNode(narrow, '⏭').props.width, 3)
+  assertTrailingClose(narrow)
   assert.doesNotMatch(narrowText, /12:34:56/u)
   assert.doesNotMatch(narrowText, /┌────┐/u)
 
-  const mediumText = textOf(createRenderer(60).render(fixture.descriptor.component))
+  const medium = createRenderer(60).render(fixture.descriptor.component)
+  const mediumText = textOf(medium)
   assert.match(mediumText, /┌────┐/u)
   assert.match(mediumText, /1:02:03 .* 12:34:56/u)
   assert.doesNotMatch(mediumText, /Live at RiNG/u)
+  assertTrailingClose(medium)
 
-  const wideText = textOf(createRenderer(120).render(fixture.descriptor.component))
+  const wide = createRenderer(120).render(fixture.descriptor.component)
+  const wideText = textOf(wide)
   assert.match(wideText, /Live at RiNG/u)
+  assertTrailingClose(wide)
   fixture.presenter.dispose()
 })
 
-test('80, 96, and 120 columns render bounded spectra while narrow bars release the stream', async () => {
+test('spectra grow on wide terminals while narrow bars release the stream', async () => {
   const fixture = await richFixture({ spectrumStyle: 'blocks' })
   const frame = {
     version: 1,
@@ -105,8 +110,16 @@ test('80, 96, and 120 columns render bounded spectra while narrow bars release t
   const narrow = renderer.render(fixture.descriptor.component)
   assert.equal(findNode(narrow, node => node.type === 'Box' && node.props.width === 24), undefined)
   assert.equal(fixture.events.includes('start spectrum'), false)
+  assertTrailingClose(narrow)
 
-  for (const [columns, cells] of [[80, 12], [96, 18], [120, 24]]) {
+  for (const [columns, cells] of [
+    [80, 12],
+    [96, 18],
+    [120, 24],
+    [140, 34],
+    [168, 48],
+    [240, 48],
+  ]) {
     renderer.resize(columns)
     renderer.render(fixture.descriptor.component)
     fixture.emitSpectrum(frame)
@@ -120,6 +133,14 @@ test('80, 96, and 120 columns render bounded spectra while narrow bars release t
       '█'.repeat(cells),
       '█'.repeat(cells),
     ])
+    assert.deepEqual(spectrum.children.map(node => node.props.color), [
+      'rainbow_blue_shimmer',
+      'rainbow_blue',
+      'claude',
+    ])
+    assert.deepEqual(spectrum.children.map(node => node.props.dimColor), [false, false, false])
+    const trailingClose = assertTrailingClose(tree)
+    assert.equal(tree.children.indexOf(spectrum) < tree.children.indexOf(trailingClose), true)
     assert.match(textOf(tree), /⏮.*▶.*⏭.*×/u)
   }
 
@@ -128,6 +149,14 @@ test('80, 96, and 120 columns render bounded spectra while narrow bars release t
   fixture.emitSpectrum({ ...frame, bins: [...frame.bins] })
   assert.equal(updates, 0, 'identical frames should not redraw the status tree')
   unsubscribe()
+
+  fixture.emitSpectrum({ ...frame, playing: false })
+  const pausedTree = renderer.render(fixture.descriptor.component)
+  const pausedSpectrum = findNode(pausedTree, node => node.type === 'Box'
+    && node.props.width === 48
+    && node.props.height === 3)
+  assert(pausedSpectrum)
+  assert.deepEqual(pausedSpectrum.children.map(node => node.props.dimColor), [true, true, true])
 
   renderer.resize(79)
   renderer.render(fixture.descriptor.component)
@@ -139,6 +168,60 @@ test('80, 96, and 120 columns render bounded spectra while narrow bars release t
 
   fixture.presenter.hide()
   assert.deepEqual(fixture.events.slice(-3), ['stop polling', 'stop spectrum', 'dispose view'])
+})
+
+test('stalled and offline players replace synthetic spectra with actionable status', async () => {
+  let now = 0
+  const stalled = {
+    ...snapshot,
+    playing: true,
+    positionMs: 0,
+    seekable: false,
+  }
+  const fixture = await richFixture({
+    snapshot: stalled,
+    spectrumStyle: 'blocks',
+    now: () => now,
+  })
+  const renderer = createRenderer(120)
+  renderer.render(fixture.descriptor.component)
+  fixture.emitSpectrum({
+    version: 1,
+    style: 'blocks',
+    playing: true,
+    bins: Array.from({ length: 32 }, () => 255),
+  })
+  assert(findNode(renderer.render(fixture.descriptor.component), node => node.type === 'Box'
+    && node.props.width === 24
+    && node.props.height === 3))
+
+  now = 3000
+  fixture.emitStatus(stalled)
+  assert.doesNotMatch(textOf(renderer.render(fixture.descriptor.component)), /not advancing/u)
+
+  now = 6000
+  fixture.emitStatus(stalled)
+  let tree = renderer.render(fixture.descriptor.component)
+  assert.match(textOf(tree), /YPM playback is not advancing; restart the player/u)
+  assert.equal(findNode(tree, node => node.type === 'Box'
+    && node.props.width === 24
+    && node.props.height === 3), undefined)
+  assert.equal(fixture.events.at(-1), 'stop spectrum')
+
+  now = 9000
+  fixture.emitStatus({ ...stalled, positionMs: 1000, seekable: true })
+  tree = renderer.render(fixture.descriptor.component)
+  assert.doesNotMatch(textOf(tree), /not advancing/u)
+  assert.equal(fixture.events.at(-1), 'start spectrum')
+  assert.equal(findNode(tree, node => node.type === 'Box'
+    && node.props.width === 24
+    && node.props.height === 3), undefined)
+
+  fixture.emitStatus(undefined)
+  tree = renderer.render(fixture.descriptor.component)
+  assert.match(textOf(tree), /YesPlayMusic TUI is not running/u)
+  assertTrailingClose(tree)
+  fixture.presenter.dispose()
 })
 
 test('spectrum off never opens a background stream', async () => {
@@ -171,6 +254,85 @@ test('a rejected rich-view registration returns the snapshot without polling', a
   assert.deepEqual(events, ['register view', 'read status'])
   assert.equal(presenter.store.getSnapshot().snapshot, undefined)
   presenter.dispose()
+})
+
+test('a failed initial status keeps the rich bar visible with an offline hint', async () => {
+  let descriptor
+  const presenter = new MusicBarPresenter({}, {
+    set() { return () => {} },
+    registerView(value) {
+      descriptor = value
+      return () => {}
+    },
+  }, {
+    startPolling() { return () => {} },
+    startSpectrum() { return () => {} },
+    async status() { throw new YpmError('process', 'offline') },
+  })
+
+  await assert.rejects(presenter.show(), error => error?.message === 'offline')
+  const tree = createRenderer(60).render(descriptor.component)
+  assert.match(textOf(tree), /YesPlayMusic TUI is not running/u)
+  assert.match(textOf(tree), /reconnect automatically/u)
+  assertTrailingClose(tree)
+  presenter.dispose()
+})
+
+test('a one-off manual refresh failure preserves an existing playback bar', async () => {
+  let calls = 0
+  let descriptor
+  const presenter = new MusicBarPresenter({}, {
+    set() { return () => {} },
+    registerView(value) {
+      descriptor = value
+      return () => {}
+    },
+  }, {
+    startPolling(receive) {
+      receive(snapshot)
+      return () => {}
+    },
+    startSpectrum() { return () => {} },
+    async status() {
+      calls += 1
+      if (calls === 1) return snapshot
+      throw new YpmError('process', 'offline once')
+    },
+  })
+
+  await presenter.show()
+  await assert.rejects(presenter.show(), error => error?.message === 'offline once')
+
+  assert.deepEqual(presenter.store.getSnapshot().snapshot, snapshot)
+  const tree = createRenderer(60).render(descriptor.component)
+  assert.doesNotMatch(textOf(tree), /YesPlayMusic TUI is not running/u)
+  presenter.dispose()
+})
+
+test('opening one presenter does not open another TUI presenter', async () => {
+  let firstRegistrations = 0
+  let secondRegistrations = 0
+  const controller = {
+    startPolling() { return () => {} },
+    startSpectrum() { return () => {} },
+    async status() { return snapshot },
+  }
+  const status = (register) => ({
+    set() { return () => {} },
+    registerView() {
+      register()
+      return () => {}
+    },
+  })
+  const first = new MusicBarPresenter({}, status(() => { firstRegistrations += 1 }), controller)
+  const second = new MusicBarPresenter({}, status(() => { secondRegistrations += 1 }), controller)
+
+  await first.show()
+
+  assert.equal(firstRegistrations, 1)
+  assert.equal(secondRegistrations, 0)
+  first.dispose()
+  second.dispose()
 })
 
 test('mouse controls expose hover feedback, serialize pending work, and close the bar', async () => {
@@ -421,6 +583,7 @@ async function richFixture(options = {}) {
   const presenter = new MusicBarPresenter(owner, status, controller, {
     ...(options.coverLoader === undefined ? {} : { coverLoader: options.coverLoader }),
     ...(options.spectrumStyle === undefined ? {} : { spectrumStyle: options.spectrumStyle }),
+    ...(options.now === undefined ? {} : { now: options.now }),
   })
   const showResult = await presenter.show()
   return {
@@ -430,6 +593,10 @@ async function richFixture(options = {}) {
     presenter,
     events,
     showResult,
+    emitStatus(value) {
+      assert(sink, 'status polling should be active')
+      sink(value)
+    },
     emitSpectrum(frame) {
       assert(spectrumSink, 'spectrum stream should be active')
       spectrumSink(frame)
@@ -502,9 +669,20 @@ function textOf(node) {
 }
 
 function controlNode(tree, label) {
-  const found = findNode(tree, node => node.type === 'Box' && textOf(node) === label)
+  const found = findNode(tree, node => node.type === 'Box'
+    && (node.children ?? []).some(child => child?.type === 'Text' && textOf(child) === label))
   assert(found, `control ${label} should exist`)
   return found
+}
+
+function assertTrailingClose(tree) {
+  const close = tree.children.at(-1)
+  assert(close, 'music bar should end with a close column')
+  assert.equal(close.type, 'Box')
+  assert.equal(close.props.width, 3)
+  assert.equal(close.props.height, 3)
+  assert.equal(textOf(close), '×')
+  return close
 }
 
 function progressNode(tree) {

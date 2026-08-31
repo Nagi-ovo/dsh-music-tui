@@ -17,13 +17,27 @@ import {
 const STATUS_KEY = 'dsh-music-tui:playback'
 const LOCAL_TICK_MS = 1000
 const CONTROL_ERROR_MS = 4000
+const PLAYBACK_STALL_MS = 6000
 const CONTROL_WIDTH = 3
+const PLAYER_OFFLINE_WARNING = 'YesPlayMusic TUI is not running'
+const PLAYBACK_STALLED_WARNING = 'YPM playback is not advancing; restart the player'
+const SPECTRUM_ROW_COLORS = [
+  'rainbow_blue_shimmer',
+  'rainbow_blue',
+  'claude',
+] as const
 
 type MusicPendingOperation = YpmControlCommand | 'seek'
 type MusicHoverTarget = YpmControlCommand | 'seek' | 'close'
 
 interface StatusViewPointerEvent {
   readonly localCol: number
+}
+
+interface PlaybackProbe {
+  readonly trackKey: string
+  readonly positionMs: number
+  readonly progressedAtMs: number
 }
 
 export interface MusicBarLayout {
@@ -43,6 +57,7 @@ export interface MusicBarState {
   readonly pending: MusicPendingOperation | undefined
   readonly previewPositionMs: number | undefined
   readonly error: string | undefined
+  readonly healthWarning: string | undefined
 }
 
 export interface MusicDisplay {
@@ -99,6 +114,7 @@ const EMPTY_STATE: MusicBarState = Object.freeze({
   pending: undefined,
   previewPositionMs: undefined,
   error: undefined,
+  healthWarning: undefined,
 })
 
 /** Mutable store whose snapshots stay referentially stable between updates. */
@@ -149,6 +165,7 @@ export class MusicBarPresenter implements MusicDisplay {
   private coverAbort: AbortController | undefined
   private coverGeneration = 0
   private coverUrl: string | null = null
+  private playbackProbe: PlaybackProbe | undefined
   private disposed = false
 
   constructor(
@@ -168,8 +185,13 @@ export class MusicBarPresenter implements MusicDisplay {
 
   async show(signal?: AbortSignal): Promise<MusicDisplayShowResult> {
     const displayed = this.open()
-    const snapshot = await this.controller.status(signal)
-    return { snapshot, displayed }
+    try {
+      const snapshot = await this.controller.status(signal)
+      return { snapshot, displayed }
+    } catch (error) {
+      if (displayed && this.store.getSnapshot().snapshot === undefined) this.receive(undefined)
+      throw error
+    }
   }
 
   hide(): void {
@@ -184,6 +206,7 @@ export class MusicBarPresenter implements MusicDisplay {
     this.clearControlError()
     this.cancelCover()
     this.coverUrl = null
+    this.playbackProbe = undefined
     this.store.clear()
   }
 
@@ -257,28 +280,56 @@ export class MusicBarPresenter implements MusicDisplay {
       this.stopTick()
       this.cancelCover()
       this.coverUrl = null
-      this.store.clear()
+      this.playbackProbe = undefined
+      this.replace({ ...EMPTY_STATE, healthWarning: PLAYER_OFFLINE_WARNING })
       return
     }
     const time = this.now()
     const previous = this.store.getSnapshot()
+    const healthWarning = this.observePlayback(snapshot, time)
     this.replace({
       snapshot,
       observedAtMs: time,
       renderedAtMs: time,
       cover: (snapshot.coverUrl ?? null) === this.coverUrl ? previous.cover : undefined,
-      spectrum: previous.spectrum,
+      spectrum: healthWarning === undefined ? previous.spectrum : undefined,
       pending: previous.pending,
       previewPositionMs: undefined,
       error: previous.error,
+      healthWarning,
     })
-    this.startTick(snapshot)
+    if (healthWarning === undefined) this.startTick(snapshot)
+    else this.stopTick()
     this.loadCover(snapshot.coverUrl ?? null)
+  }
+
+  private observePlayback(snapshot: YpmSnapshot, observedAtMs: number): string | undefined {
+    if (!snapshot.playing || snapshot.title === null) {
+      this.playbackProbe = undefined
+      return undefined
+    }
+    const trackKey = JSON.stringify([
+      snapshot.title,
+      snapshot.artist,
+      snapshot.album,
+      snapshot.durationMs,
+    ])
+    const previous = this.playbackProbe
+    if (previous === undefined
+      || previous.trackKey !== trackKey
+      || previous.positionMs !== snapshot.positionMs) {
+      this.playbackProbe = { trackKey, positionMs: snapshot.positionMs, progressedAtMs: observedAtMs }
+      return undefined
+    }
+    return observedAtMs - previous.progressedAtMs >= PLAYBACK_STALL_MS
+      ? PLAYBACK_STALLED_WARNING
+      : undefined
   }
 
   private receiveSpectrum(spectrum: YpmSpectrumFrame | undefined): void {
     if (!this.visible || this.disposed) return
     const current = this.store.getSnapshot()
+    if (current.healthWarning !== undefined) return
     if (sameSpectrumFrame(current.spectrum, spectrum)) return
     this.replace({ ...current, spectrum })
   }
@@ -472,23 +523,47 @@ function createMusicBarView(
     const wantsSpectrum = spectrumPreference !== 'off'
       && layout.spectrumCells > 0
       && snapshot?.title != null
+      && state.healthWarning === undefined
     React.useEffect(() => {
       actions.spectrumDemand(wantsSpectrum)
       return () => actions.spectrumDemand(false)
     }, [wantsSpectrum])
-    if (snapshot === undefined || snapshot.title === null) return null
+    if (snapshot === undefined) {
+      if (state.healthWarning === undefined) return null
+      return React.createElement(
+        ui.Box,
+        { flexDirection: 'row', width: '100%', height: 3 },
+        React.createElement(
+          ui.Box,
+          { flexDirection: 'column', flexGrow: 1, flexShrink: 1, minWidth: 0, height: 3 },
+          React.createElement(ui.Text, { bold: true, wrap: 'truncate' }, 'YesPlayMusic'),
+          React.createElement(ui.Text, { color: 'error', wrap: 'truncate' }, `! ${state.healthWarning}`),
+          React.createElement(
+            ui.Text,
+            { dimColor: true, wrap: 'truncate' },
+            'Start ypm; this bar will reconnect automatically',
+          ),
+        ),
+        closeNode(React, ui, 'unicode', hovered, setHovered, actions.close),
+      )
+    }
+    if (snapshot.title === null) return null
     const spectrumFrame = state.spectrum
     const spectrumStyle = spectrumFrame === undefined
       ? undefined
       : resolveSpectrumStyle(spectrumPreference, spectrumFrame.style)
-    const spectrum = spectrumFrame === undefined || spectrumStyle === undefined || layout.spectrumCells === 0
+    const spectrum = spectrumFrame === undefined
+      || spectrumStyle === undefined
+      || layout.spectrumCells === 0
+      || state.healthWarning !== undefined
       ? null
       : spectrumNode(React, ui, spectrumFrame, spectrumStyle, layout.spectrumCells)
+    const statusMessage = state.error ?? state.healthWarning
     const body = React.createElement(
       ui.Box,
       { flexDirection: 'column', flexGrow: 1, flexShrink: 1, minWidth: 0, height: 3 },
       React.createElement(ui.Text, { bold: true, wrap: 'truncate' }, snapshot.title),
-      state.error === undefined
+      statusMessage === undefined
         ? React.createElement(
             ui.Text,
             { dimColor: true, wrap: 'truncate' },
@@ -497,7 +572,7 @@ function createMusicBarView(
         : React.createElement(
             ui.Text,
             { color: 'error', wrap: 'truncate' },
-            `! ${state.error}`,
+            `! ${statusMessage}`,
           ),
       React.createElement(
         ui.Box,
@@ -518,27 +593,8 @@ function createMusicBarView(
           ? progressNode(React, ui, state, layout.progressCells, hovered, setHovered, actions)
           : null,
         React.createElement(ui.Box, { flexGrow: 1, minWidth: 0 }),
-        React.createElement(
-          ui.Box,
-          {
-            onClick: actions.close,
-            onMouseEnter: () => setHovered('close'),
-            onMouseLeave: () => setHovered(undefined),
-            backgroundColor: hovered === 'close' ? 'userMessageBackgroundHover' : undefined,
-            flexShrink: 0,
-            width: CONTROL_WIDTH,
-            alignItems: 'center',
-            justifyContent: 'center',
-          },
-          React.createElement(
-            ui.Text,
-            { dimColor: hovered !== 'close', bold: hovered === 'close' },
-            controlGlyph(snapshot.iconStyle, 'close'),
-          ),
-        ),
       ),
     )
-    if (!layout.showCover && spectrum === null) return body
     return React.createElement(
       ui.Box,
       { flexDirection: 'row', width: '100%', height: 3 },
@@ -547,6 +603,8 @@ function createMusicBarView(
       body,
       spectrum === null ? null : React.createElement(ui.Box, { width: 1, flexShrink: 0 }),
       spectrum,
+      spectrum === null ? null : React.createElement(ui.Box, { width: 1, flexShrink: 0 }),
+      closeNode(React, ui, snapshot.iconStyle, hovered, setHovered, actions.close),
     )
   }
 }
@@ -579,12 +637,51 @@ function spectrumNode(
       ui.Text,
       {
         key: `spectrum-${index}`,
-        color: 'suggestion',
+        color: SPECTRUM_ROW_COLORS[index] ?? 'claude',
         dimColor: !frame.playing,
         wrap: 'truncate',
       },
       row,
     )),
+  )
+}
+
+function closeNode(
+  React: StatusViewReact,
+  ui: StatusViewUi,
+  iconStyle: YpmSnapshot['iconStyle'],
+  hovered: MusicHoverTarget | undefined,
+  setHovered: (value: MusicHoverTarget | undefined) => void,
+  close: () => void,
+): unknown {
+  return React.createElement(
+    ui.Box,
+    {
+      flexDirection: 'column',
+      justifyContent: 'flex-end',
+      width: CONTROL_WIDTH,
+      height: 3,
+      flexShrink: 0,
+    },
+    React.createElement(
+      ui.Box,
+      {
+        onClick: close,
+        onMouseEnter: () => setHovered('close'),
+        onMouseLeave: () => setHovered(undefined),
+        backgroundColor: hovered === 'close' ? 'userMessageBackgroundHover' : undefined,
+        width: CONTROL_WIDTH,
+        height: 1,
+        flexShrink: 0,
+        alignItems: 'center',
+        justifyContent: 'center',
+      },
+      React.createElement(
+        ui.Text,
+        { dimColor: hovered !== 'close', bold: hovered === 'close' },
+        controlGlyph(iconStyle, 'close'),
+      ),
+    ),
   )
 }
 

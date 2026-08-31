@@ -25,11 +25,13 @@ fullscreen 模式下，鼠标按钮与 slash 命令等价，进度条支持点�
 宿主支持 Kitty graphics 时封面会显示为平滑真图；其他终端、inline、辅助功能模式
 或终端多路复用器会自动使用同尺寸的半块字符缩略图，不需要额外配置。
 终端达到 80 列时，音乐条右侧才订阅真实音频频谱；80/96/120 列分别使用
-12/18/24 格，窄屏会释放本插件的频谱订阅；若 YPM 自身没有显示频谱，分析器也随之停用。内置 `blocks`、`led`、
+12/18/24 格，超过 120 列后每增加 2 列再增加 1 格，最多 48 格。窄屏会释放本插件的频谱订阅；若 YPM 自身没有显示频谱，分析器也随之停用。内置 `blocks`、`led`、
 `braille`、`shade` 四种紧凑样式，也可以跟随 YPM 当前支持的同名样式。
 
 控制结果只会说“已发送”。YesPlayMusic 的 CLI 确认的是命令已接收，而不是播放器
 已经完成切歌；插件随后会重新读取状态，绝不把确认包冒充最终播放状态。
+播放器离线时音乐条会保留并提示重新启动；若 YPM 声称正在播放、但远端进度连续
+6 秒没有前进，音乐条会停止可能失真的频谱并提示重启，状态恢复后自动重连。
 
 ## 前置条件
 
@@ -47,21 +49,17 @@ ypm --version
 
 ## 安装
 
-当前 npm 包尚未发布。从仓库安装：
+当前版本通过 GitHub Release 分发。从对应 tag 安装本地工作树：
 
 ```sh
-git clone https://github.com/Nagi-ovo/dsh-music-tui.git
+git clone --branch v0.1.0 --depth 1 https://github.com/Nagi-ovo/dsh-music-tui.git
 cd dsh-music-tui
 pnpm install --frozen-lockfile
 pnpm build
 dsh plugin --profile dsh-tui add "$PWD"
 ```
 
-发布到 npm 后，可以直接使用包名：
-
-```sh
-dsh plugin --profile dsh-tui add @dsh-tui-ecosystem/music
-```
+参与开发时，省略 `--branch v0.1.0 --depth 1` 即可使用最新分支。
 
 先在另一个终端或后台启动 YesPlayMusic TUI，再启动 DSH：
 
@@ -72,6 +70,9 @@ dsh --profile dsh-tui
 不需要改 YesPlayMusic 源码，也不需要在 YesPlayMusic 仓库里安装插件。
 本插件不会替你启动或关闭 YesPlayMusic。
 
+音乐条的显示状态只属于当前 TUI。你在一个 TUI 里执行 `/music`，不会打开其他
+TUI 的音乐条；多个 TUI 的播放控制仍会操作同一个 YesPlayMusic TUI 实例。
+
 ## 配置
 
 默认配置已经写进 `cordis.patch.yml`：
@@ -80,8 +81,8 @@ dsh --profile dsh-tui
 | --- | --- | --- |
 | `executable` | `ypm` | CLI 名称或绝对路径 |
 | `showStatus` | `true` | 是否启用可由 `/music` 打开的音乐条；启动时仍保持隐藏 |
-| `pollIntervalMs` | `3000` | 在线轮询间隔（1000–60000 ms） |
-| `timeoutMs` | `3000` | 单次 CLI 硬超时（250–30000 ms） |
+| `pollIntervalMs` | `3000` | 在线轮询间隔（1000 至 60000 ms） |
+| `timeoutMs` | `3000` | 单次 CLI 硬超时（250 至 30000 ms） |
 | `spectrumStyle` | `follow` | `off` / `follow` / `blocks` / `led` / `braille` / `shade` |
 
 `showStatus: false` 不会注册音乐条；此时 `/music` 与 `/music show` 退化为一次性
@@ -123,7 +124,7 @@ dsh-TUI /music + status
 - 音乐条注册成功后默认每 3 秒读取一次状态；播放时每秒在本地推进显示进度，
   暂停时冻结。一次读取失败保留旧状态，连续两次失败才清除；离线后轮询退避。
 - 频谱只在音乐条可见、存在歌曲且终端至少 80 列时，通过公开的
-  `ypm --json --tui spectrum --fps 12` NDJSON 流订阅。协议固定为 32 个 0–255 bins；
+  `ypm --json --tui spectrum --fps 12` NDJSON 流订阅。协议固定为 32 个取值范围为 0 至 255 的 bins；
   不读取 PCM、不直连 socket，断流会清掉旧画面并有界退避重连，隐藏、变窄或卸载会中止子进程。
 - `follow` 只跟随 YPM 的 `blocks`、`led`、`braille`、`shade`；遇到其他样式安全回退为
   `blocks`。重复帧不会触发无意义的 TUI 重绘。
