@@ -57,21 +57,18 @@ ypm --version
 
 ## Installation
 
-Install by package name:
+This release is distributed through GitHub Releases. Install the tagged
+checkout locally:
 
 ```sh
-dsh plugin --profile dsh-tui add @dsh-tui-ecosystem/music
-```
-
-For source development, install the local checkout:
-
-```sh
-git clone https://github.com/Nagi-ovo/dsh-music-tui.git
+git clone --branch v0.1.0 --depth 1 https://github.com/Nagi-ovo/dsh-music-tui.git
 cd dsh-music-tui
 pnpm install --frozen-lockfile
 pnpm build
 dsh plugin --profile dsh-tui add "$PWD"
 ```
+
+For development, omit `--branch v0.1.0 --depth 1` to use the latest branch.
 
 Start YesPlayMusic TUI in another terminal or in the background, then start DSH:
 

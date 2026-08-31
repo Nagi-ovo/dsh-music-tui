@@ -49,21 +49,17 @@ ypm --version
 
 ## 安装
 
-使用包名安装：
+当前版本通过 GitHub Release 分发。从对应 tag 安装本地工作树：
 
 ```sh
-dsh plugin --profile dsh-tui add @dsh-tui-ecosystem/music
-```
-
-从源码开发时，可以安装本地工作树：
-
-```sh
-git clone https://github.com/Nagi-ovo/dsh-music-tui.git
+git clone --branch v0.1.0 --depth 1 https://github.com/Nagi-ovo/dsh-music-tui.git
 cd dsh-music-tui
 pnpm install --frozen-lockfile
 pnpm build
 dsh plugin --profile dsh-tui add "$PWD"
 ```
+
+参与开发时，省略 `--branch v0.1.0 --depth 1` 即可使用最新分支。
 
 先在另一个终端或后台启动 YesPlayMusic TUI，再启动 DSH：
 
