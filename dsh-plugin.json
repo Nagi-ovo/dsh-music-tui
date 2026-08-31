@@ -1,0 +1,54 @@
+{
+  "$schema": "https://dsh.community/schemas/dsh-plugin-0.15.json",
+  "manifestVersion": "0.15",
+  "id": "com.dsh-tui-ecosystem.music",
+  "name": "dsh Music TUI",
+  "version": "0.1.0",
+  "facets": {
+    "host": {
+      "entry": "lib/facet.js",
+      "apiVersion": "v1alpha1"
+    }
+  },
+  "requires": {
+    "contracts": [
+      {
+        "apiVersion": "commands.dsh/v1alpha1",
+        "kind": "Command"
+      }
+    ]
+  },
+  "permissions": [
+    {
+      "name": "commands.invoke",
+      "scope": "com.dsh-tui-ecosystem.music.command.music",
+      "reason": "Run the user-invoked /music player controls"
+    }
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "id": "com.dsh-tui-ecosystem.music.command.music",
+        "title": "Music",
+        "description": "Open a compact now-playing bar and control the local YesPlayMusic TUI player"
+      }
+    ]
+  },
+  "subscriptions": [],
+  "license": "MIT",
+  "source": {
+    "repository": "https://github.com/dsh-tui-ecosystem/dsh-music-tui"
+  },
+  "compat": {
+    "hosts": [
+      "dsh-tui >=0.9.2 <0.11.0"
+    ]
+  },
+  "overrides": [
+    {
+      "target": "cordis.patch.yml",
+      "kind": "patch",
+      "description": "Mount the Cordis plugin into the active DSH profile"
+    }
+  ]
+}

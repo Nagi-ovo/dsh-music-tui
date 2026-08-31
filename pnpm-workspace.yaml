@@ -1,0 +1,11 @@
+packages:
+  - '.'
+
+# The host owns framework peers. Installing this plugin for development must
+# not materialize a second DeepSeek Harness runtime tree from prerelease tags.
+autoInstallPeers: false
+strictPeerDependencies: false
+
+allowBuilds:
+  '@google/genai': false
+  protobufjs: false

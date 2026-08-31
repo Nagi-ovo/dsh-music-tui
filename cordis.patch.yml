@@ -1,0 +1,14 @@
+# Self-mount the companion after `dsh plugin --profile <profile> add`.
+# Commands remain optional. The mount waits for dsh-TUI's status service so its
+# one-time capability snapshot cannot race service activation; hosts whose
+# status service lacks rich views still degrade to one-shot command output.
+# The enabled music bar remains hidden until `/music` opens it.
+- insert:
+    - id: dsh-music-tui
+      name: '@dsh-tui-ecosystem/music'
+      inject: [tuiStatus]
+      config:
+        executable: ypm
+        showStatus: true
+        pollIntervalMs: 3000
+        timeoutMs: 3000

@@ -1,0 +1,419 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import {
+  interpolatedPosition,
+  MusicBarPresenter,
+  MusicControlPendingError,
+  musicBarLayout,
+  progressLine,
+} from '../lib/music-bar.js'
+import { YpmError } from '../lib/ypm-client.js'
+
+const snapshot = Object.freeze({
+  playing: false,
+  title: '春日影という名前の長い曲',
+  artist: 'CRYCHIC',
+  album: 'CRYCHIC Live at RiNG',
+  positionMs: 3_723_000,
+  durationMs: 45_296_000,
+  coverUrl: null,
+  seekable: true,
+  iconStyle: 'unicode',
+  source: 'tui',
+})
+
+const flush = () => new Promise(resolve => setImmediate(resolve))
+
+test('32, 60, and 120 columns progressively reveal progress, cover, and album', () => {
+  assert.deepEqual(musicBarLayout(32), {
+    showCover: false,
+    showAlbum: false,
+    showProgress: false,
+    progressCells: 0,
+  })
+  assert.deepEqual(musicBarLayout(60), {
+    showCover: true,
+    showAlbum: false,
+    showProgress: true,
+    progressCells: 10,
+  })
+  assert.deepEqual(musicBarLayout(120), {
+    showCover: true,
+    showAlbum: true,
+    showProgress: true,
+    progressCells: 20,
+  })
+})
+
+test('playing position interpolates locally while paused position stays frozen', () => {
+  const state = {
+    snapshot: { ...snapshot, playing: true, positionMs: 5000, durationMs: 10_000 },
+    observedAtMs: 1000,
+    renderedAtMs: 3250,
+    cover: undefined,
+    pending: undefined,
+    error: undefined,
+  }
+  assert.equal(interpolatedPosition(state), 7250)
+  assert.equal(progressLine(state, 10), '0:07 ━━━━━━━●── 0:10')
+  assert.equal(interpolatedPosition({
+    ...state,
+    snapshot: { ...state.snapshot, playing: false },
+  }), 5000)
+})
+
+test('rich hosts receive a three-row responsive view with narrow controls intact', async () => {
+  const fixture = await richFixture()
+  assert.deepEqual(fixture.showResult, { snapshot, displayed: true })
+  assert.equal(fixture.descriptor.maxRows, 3)
+  assert.equal(fixture.identity, fixture.owner)
+
+  const narrow = createRenderer(32).render(fixture.descriptor.component)
+  const narrowText = textOf(narrow)
+  assert.match(narrowText, /春日影/u)
+  assert.match(narrowText, /CRYCHIC/u)
+  assert.match(narrowText, /⏮.*▶.*⏭.*×/u)
+  assert.equal(controlNode(narrow, '⏮').props.width, 3)
+  assert.equal(controlNode(narrow, '▶').props.width, 3)
+  assert.equal(controlNode(narrow, '⏭').props.width, 3)
+  assert.doesNotMatch(narrowText, /12:34:56/u)
+  assert.doesNotMatch(narrowText, /┌────┐/u)
+
+  const mediumText = textOf(createRenderer(60).render(fixture.descriptor.component))
+  assert.match(mediumText, /┌────┐/u)
+  assert.match(mediumText, /1:02:03 .* 12:34:56/u)
+  assert.doesNotMatch(mediumText, /Live at RiNG/u)
+
+  const wideText = textOf(createRenderer(120).render(fixture.descriptor.component))
+  assert.match(wideText, /Live at RiNG/u)
+  fixture.presenter.dispose()
+})
+
+test('a rejected rich-view registration returns the snapshot without polling', async () => {
+  const events = []
+  const presenter = new MusicBarPresenter({}, {
+    set() { throw new Error('legacy status must not be used') },
+    registerView() {
+      events.push('register view')
+      return undefined
+    },
+  }, {
+    startPolling() {
+      events.push('start polling')
+      return () => events.push('stop polling')
+    },
+    async status() {
+      events.push('read status')
+      return snapshot
+    },
+  })
+
+  assert.deepEqual(await presenter.show(), { snapshot, displayed: false })
+  assert.deepEqual(events, ['register view', 'read status'])
+  assert.equal(presenter.store.getSnapshot().snapshot, undefined)
+  presenter.dispose()
+})
+
+test('mouse controls expose hover feedback, serialize pending work, and close the bar', async () => {
+  let release
+  const controls = []
+  const fixture = await richFixture({
+    control: command => new Promise(resolve => {
+      controls.push(command)
+      release = () => resolve({ ack: { ok: true, source: 'tui' }, snapshot })
+    }),
+  })
+  const renderer = createRenderer(60)
+  let tree = renderer.render(fixture.descriptor.component)
+  let prev = controlNode(tree, '⏮')
+  prev.props.onMouseEnter()
+  tree = renderer.render(fixture.descriptor.component)
+  prev = controlNode(tree, '⏮')
+  assert.equal(prev.props.backgroundColor, 'userMessageBackgroundHover')
+  assert.equal(prev.children[0].props.bold, true)
+
+  prev.props.onClick()
+  await flush()
+  assert.deepEqual(controls, ['prev'])
+  tree = renderer.render(fixture.descriptor.component)
+  assert.match(textOf(tree), /…/u)
+  assert.equal(controlNode(tree, '…').props.width, 3)
+  assert.equal(controlNode(tree, '▶').props.width, 3)
+  assert.equal(controlNode(tree, '⏭').props.width, 3)
+  assert.equal(controlNode(tree, '▶').props.onClick, undefined)
+  assert.equal(controlNode(tree, '⏭').props.onClick, undefined)
+  await assert.rejects(
+    fixture.presenter.control('next'),
+    error => error instanceof MusicControlPendingError,
+  )
+
+  release()
+  await flush()
+  tree = renderer.render(fixture.descriptor.component)
+  controlNode(tree, '▶').props.onClick()
+  await flush()
+  assert.deepEqual(controls, ['prev', 'toggle'])
+  release()
+  await flush()
+  tree = renderer.render(fixture.descriptor.component)
+  controlNode(tree, '⏭').props.onClick()
+  await flush()
+  assert.deepEqual(controls, ['prev', 'toggle', 'next'])
+  release()
+  await flush()
+  tree = renderer.render(fixture.descriptor.component)
+  controlNode(tree, '×').props.onClick()
+  assert.deepEqual(fixture.events.slice(-2), ['stop polling', 'dispose view'])
+})
+
+test('click failures appear in the bar and recover on the next control', async () => {
+  let fail = true
+  const fixture = await richFixture({
+    control: async () => {
+      if (fail) throw new YpmError('process', 'failed', 'YesPlayMusic rejected the action')
+      return { ack: { ok: true, source: 'tui' }, snapshot }
+    },
+  })
+  const renderer = createRenderer(60)
+  controlNode(renderer.render(fixture.descriptor.component), '⏭').props.onClick()
+  await flush()
+  assert.match(
+    textOf(renderer.render(fixture.descriptor.component)),
+    /! YesPlayMusic rejected the action/u,
+  )
+
+  fail = false
+  controlNode(renderer.render(fixture.descriptor.component), '⏭').props.onClick()
+  assert.equal(fixture.presenter.store.getSnapshot().error, undefined)
+  await flush()
+  fixture.presenter.dispose()
+})
+
+test('progress click seeks immediately while drag previews and commits only on release', async () => {
+  const seeks = []
+  const fixture = await richFixture({
+    seek: async positionMs => {
+      seeks.push(positionMs)
+      return { ack: { ok: true, source: 'tui' }, snapshot }
+    },
+  })
+  const renderer = createRenderer(60)
+  let tree = renderer.render(fixture.descriptor.component)
+  let progress = progressNode(tree)
+
+  progress.props.onClick({ localCol: 9 })
+  await flush()
+  assert.deepEqual(seeks, [snapshot.durationMs])
+
+  tree = renderer.render(fixture.descriptor.component)
+  progress = progressNode(tree)
+  progress.props.onDragStart({ localCol: 2 })
+  progress.props.onDragMove({ localCol: 7 })
+  assert.deepEqual(seeks, [snapshot.durationMs])
+  tree = renderer.render(fixture.descriptor.component)
+  assert.match(textOf(tree), /9:47:10/u)
+
+  progressNode(tree).props.onDragEnd({ localCol: 4 })
+  await flush()
+  assert.deepEqual(seeks, [snapshot.durationMs, 20_131_556])
+  fixture.presenter.dispose()
+})
+
+test('a late drag release is ignored after the music bar closes', async () => {
+  const seeks = []
+  const fixture = await richFixture({
+    seek: async positionMs => {
+      seeks.push(positionMs)
+      return { ack: { ok: true, source: 'tui' }, snapshot }
+    },
+  })
+  const tree = createRenderer(60).render(fixture.descriptor.component)
+  const progress = progressNode(tree)
+
+  controlNode(tree, '×').props.onClick()
+  progress.props.onDragEnd({ localCol: 7 })
+  await flush()
+
+  assert.deepEqual(seeks, [])
+  fixture.presenter.dispose()
+})
+
+test('old YPM snapshots keep progress readable but non-interactive', async () => {
+  const fixture = await richFixture({
+    snapshot: { ...snapshot, seekable: false },
+  })
+  const tree = createRenderer(60).render(fixture.descriptor.component)
+  assert.equal(progressNode(tree).props.onClick, undefined)
+  assert.equal(progressNode(tree).props.onDragStart, undefined)
+  fixture.presenter.dispose()
+})
+
+test('Nerd Font mode swaps controls without changing their cell geometry', async () => {
+  const fixture = await richFixture({
+    snapshot: { ...snapshot, iconStyle: 'nerd' },
+  })
+  const tree = createRenderer(60).render(fixture.descriptor.component)
+  for (const glyph of ['\uf048', '\uf04b', '\uf051', '\uf00d']) {
+    assert.equal(controlNode(tree, glyph).props.width, 3)
+  }
+  fixture.presenter.dispose()
+})
+
+test('graphics-capable hosts receive RGBA artwork with the cell thumbnail as fallback', async () => {
+  const cover = {
+    image: { data: new Uint8Array(96 * 96 * 4), width: 96, height: 96 },
+    rows: Array.from({ length: 3 }, () =>
+      Array.from({ length: 6 }, () => ({ top: '#112233', bottom: '#445566' }))),
+  }
+  const fixture = await richFixture({
+    snapshot: {
+      ...snapshot,
+      coverUrl: 'https://p1.music.126.net/cover.jpg',
+    },
+    coverLoader: { load: async () => cover },
+  })
+  await flush()
+  const tree = createRenderer(60, { image: true }).render(fixture.descriptor.component)
+  const image = findNode(tree, node => node.type === 'Image')
+  assert(image, 'host Image node should be used when available')
+  assert.equal(image.props.source, cover.image)
+  assert.equal(image.props.width, 6)
+  assert.equal(image.props.height, 3)
+  assert.equal(image.props.alt, '')
+  assert.equal((textOf(image).match(/▀/gu) ?? []).length, 18)
+  fixture.presenter.dispose()
+})
+
+test('artwork loads only when its URL changes and hiding aborts the active load', async () => {
+  const calls = []
+  let sink
+  const loader = {
+    load(url, signal) {
+      calls.push({ url, signal })
+      return new Promise(() => {})
+    },
+  }
+  const first = { ...snapshot, coverUrl: 'https://p1.music.126.net/a.jpg' }
+  const controller = {
+    startPolling(value) {
+      sink = value
+      return () => {}
+    },
+    async status() {
+      sink(first)
+      return first
+    },
+  }
+  const status = {
+    set() { return () => {} },
+    registerView() { return () => {} },
+  }
+  const presenter = new MusicBarPresenter({}, status, controller, { coverLoader: loader })
+  await presenter.show()
+  sink({ ...first })
+  sink({ ...first, coverUrl: 'https://p1.music.126.net/b.jpg' })
+  assert.deepEqual(calls.map(call => call.url), [
+    'https://p1.music.126.net/a.jpg',
+    'https://p1.music.126.net/b.jpg',
+  ])
+  assert.equal(calls[0].signal.aborted, true)
+  presenter.hide()
+  assert.equal(calls[1].signal.aborted, true)
+})
+
+async function richFixture(options = {}) {
+  const events = []
+  const owner = {}
+  let sink
+  let descriptor
+  let identity
+  const fixtureSnapshot = options.snapshot ?? snapshot
+  const controller = {
+    startPolling(value) {
+      sink = value
+      events.push('start polling')
+      return () => events.push('stop polling')
+    },
+    async status() {
+      sink(fixtureSnapshot)
+      return fixtureSnapshot
+    },
+    control: options.control ?? (async () => ({ ack: { ok: true, source: 'tui' }, snapshot: fixtureSnapshot })),
+    seek: options.seek ?? (async () => ({ ack: { ok: true, source: 'tui' }, snapshot: fixtureSnapshot })),
+  }
+  const status = {
+    set() { return () => {} },
+    registerView(value, valueIdentity) {
+      descriptor = value
+      identity = valueIdentity
+      events.push('register view')
+      return () => events.push('dispose view')
+    },
+  }
+  const presenter = new MusicBarPresenter(owner, status, controller, {
+    ...(options.coverLoader === undefined ? {} : { coverLoader: options.coverLoader }),
+  })
+  const showResult = await presenter.show()
+  return { descriptor, identity, owner, presenter, events, showResult }
+}
+
+function createRenderer(columns, options = {}) {
+  const state = []
+  let cursor = 0
+  const React = {
+    createElement(type, props, ...children) {
+      return { type, props: props ?? {}, children }
+    },
+    useSyncExternalStore(_subscribe, getSnapshot) {
+      return getSnapshot()
+    },
+    useState(initial) {
+      const index = cursor
+      cursor += 1
+      if (!(index in state)) state[index] = initial
+      return [state[index], value => { state[index] = value }]
+    },
+  }
+  const ui = {
+    Box: 'Box',
+    ...(options.image ? { Image: 'Image' } : {}),
+    Text: 'Text',
+    useTerminalSize: () => ({ columns, rows: 40 }),
+  }
+  return {
+    render(component) {
+      cursor = 0
+      return component({ React, ui })
+    },
+  }
+}
+
+function textOf(node) {
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (node === null || node === undefined || typeof node !== 'object') return ''
+  return (node.children ?? []).map(textOf).join('')
+}
+
+function controlNode(tree, label) {
+  const found = findNode(tree, node => node.type === 'Box' && textOf(node) === label)
+  assert(found, `control ${label} should exist`)
+  return found
+}
+
+function progressNode(tree) {
+  const found = findNode(tree, node => node.type === 'Box'
+    && node.props.width === 10
+    && /^[━●─]+$/u.test(textOf(node)))
+  assert(found, 'interactive progress gauge should exist')
+  return found
+}
+
+function findNode(node, predicate) {
+  if (node === null || node === undefined || typeof node !== 'object') return undefined
+  if (predicate(node)) return node
+  for (const child of node.children ?? []) {
+    const found = findNode(child, predicate)
+    if (found !== undefined) return found
+  }
+  return undefined
+}
