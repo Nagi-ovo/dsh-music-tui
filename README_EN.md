@@ -129,9 +129,10 @@ dsh-TUI /music + status
 - Newer `ypm` builds explicitly advertise seeking with `seekable` and project
   the user's selected glyph palette through `iconStyle`. Older output keeps
   progress readable but non-interactive and uses Unicode controls.
-- Newer `ypm` builds may return `coverUrl`. The plugin downloads JPEGs only
-  over HTTPS from `music.126.net` or its subdomains, revalidates every redirect,
-  and enforces a two-second and 256 KiB limit. Failure leaves a placeholder.
+- Newer `ypm` builds may return `coverUrl`. The plugin downloads JPEG or PNG
+  only over HTTPS from `music.126.net` or its subdomains, identifies the real
+  file signature when CDN headers are wrong, revalidates every redirect, and
+  caps requests at two seconds, 256 KiB, and 1024×1024 pixels. Failure leaves a placeholder.
 - Artwork is fetched only when its URL changes and the in-memory cache holds at
   most 16 covers. Text and controls continue to work with older `ypm` output
   that has no `coverUrl`.

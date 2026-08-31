@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { encode as encodePng } from 'fast-png'
 import { encode as encodeJpeg } from 'jpeg-js'
 import { allowedCoverUrl, CoverArtLoader } from '../lib/cover-art.js'
 
@@ -89,22 +90,38 @@ test('JPEG artwork decodes into a bounded six-by-three terminal thumbnail', asyn
   }
 })
 
-test('NetEase image/jpg responses are accepted as JPEG artwork', async () => {
+test('NetEase PNG bytes mislabeled as image/jpg still render artwork', async () => {
+  const rgba = new Uint8Array(8 * 8 * 4).fill(255)
+  const png = encodePng({ width: 8, height: 8, data: rgba })
   const loader = new CoverArtLoader({
-    fetcher: async () => new Response(new Uint8Array([1]), {
+    fetcher: async () => new Response(png, {
       status: 200,
       headers: { 'content-type': 'image/jpg' },
-    }),
-    decoder: () => ({
-      width: 1,
-      height: 1,
-      data: new Uint8Array([40, 100, 180, 255]),
     }),
   })
 
   const cover = await loader.load('https://p4.music.126.net/cover.jpg')
+  assert.equal(cover?.image.width, 96)
+  assert.equal(cover?.image.data.byteLength, 96 * 96 * 4)
   assert.equal(cover?.rows.length, 3)
   assert.equal(cover?.rows[0]?.length, 6)
+})
+
+test('oversized PNG dimensions are rejected before pixel inflation', async () => {
+  const header = new Uint8Array(33)
+  header.set([137, 80, 78, 71, 13, 10, 26, 10])
+  new DataView(header.buffer).setUint32(8, 13)
+  header.set([73, 72, 68, 82], 12)
+  new DataView(header.buffer).setUint32(16, 2048)
+  new DataView(header.buffer).setUint32(20, 2048)
+  const loader = new CoverArtLoader({
+    fetcher: async () => new Response(header, {
+      status: 200,
+      headers: { 'content-type': 'image/png' },
+    }),
+  })
+
+  assert.equal(await loader.load('https://p4.music.126.net/huge.png'), undefined)
 })
 
 test('the cover cache retains the sixteen most recently used URLs', async () => {

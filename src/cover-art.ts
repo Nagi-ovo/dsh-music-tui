@@ -1,3 +1,9 @@
+import {
+  convertIndexedToRgb,
+  decode as decodePng,
+  hasPngSignature,
+  type DecodedPng,
+} from 'fast-png'
 import { decode as decodeJpeg } from 'jpeg-js'
 
 const COVER_COLUMNS = 6
@@ -7,7 +13,9 @@ const DOWNLOAD_TIMEOUT_MS = 2000
 const MAX_DOWNLOAD_BYTES = 256 * 1024
 const MAX_REDIRECTS = 3
 const MAX_CACHE_ENTRIES = 16
-const JPEG_CONTENT_TYPES = new Set(['image/jpeg', 'image/jpg'])
+const MAX_DECODE_EDGE = 1024
+const MAX_DECODE_PIXELS = 1024 * 1024
+const IMAGE_CONTENT_TYPES = new Set(['image/jpeg', 'image/jpg', 'image/png'])
 
 export interface CoverCell {
   readonly top: string
@@ -26,7 +34,12 @@ export interface TerminalCover {
 }
 
 type Fetcher = typeof fetch
-type Decoder = typeof decodeJpeg
+type DecodedImage = {
+  readonly width: number
+  readonly height: number
+  readonly data: Uint8Array
+}
+type Decoder = (data: Uint8Array) => DecodedImage
 
 export interface CoverArtLoaderOptions {
   readonly fetcher?: Fetcher
@@ -37,11 +50,11 @@ export interface CoverArtLoaderOptions {
 export class CoverArtLoader {
   private readonly cache = new Map<string, TerminalCover>()
   private readonly fetcher: Fetcher
-  private readonly decoder: Decoder
+  private readonly decoder: Decoder | undefined
 
   constructor(options: CoverArtLoaderOptions = {}) {
     this.fetcher = options.fetcher ?? fetch
-    this.decoder = options.decoder ?? decodeJpeg
+    this.decoder = options.decoder
   }
 
   async load(source: string, signal?: AbortSignal): Promise<TerminalCover | undefined> {
@@ -58,13 +71,8 @@ export class CoverArtLoader {
     try {
       const bytes = await downloadCover(initial, this.fetcher, signal)
       if (bytes === undefined) return undefined
-      const decoded = this.decoder(bytes, {
-        useTArray: true,
-        formatAsRGBA: true,
-        tolerantDecoding: false,
-        maxResolutionInMP: 4,
-        maxMemoryUsageInMB: 32,
-      })
+      const decoded = this.decoder?.(bytes) ?? decodeCover(bytes)
+      if (decoded === undefined) return undefined
       const cover = thumbnail(decoded)
       if (cover === undefined) return undefined
       this.cache.set(key, cover)
@@ -115,7 +123,7 @@ async function downloadCover(
       method: 'GET',
       redirect: 'manual',
       signal,
-      headers: { accept: 'image/jpeg' },
+      headers: { accept: 'image/jpeg, image/png' },
     })
     if (isRedirect(response.status)) {
       await response.body?.cancel()
@@ -129,7 +137,7 @@ async function downloadCover(
     }
     if (response.status !== 200 || response.body === null) return undefined
     const contentType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase()
-    if (contentType === undefined || !JPEG_CONTENT_TYPES.has(contentType)) return undefined
+    if (contentType === undefined || !IMAGE_CONTENT_TYPES.has(contentType)) return undefined
     const declared = response.headers.get('content-length')
     if (declared !== null) {
       const length = Number(declared)
@@ -164,16 +172,107 @@ async function readBounded(response: Response, limit: number): Promise<Uint8Arra
   return result
 }
 
+/** Decode by file signature because NetEase sometimes labels PNG bytes as image/jpg. */
+function decodeCover(bytes: Uint8Array): DecodedImage | undefined {
+  if (hasJpegSignature(bytes)) {
+    const decoded = decodeJpeg(bytes, {
+      useTArray: true,
+      formatAsRGBA: true,
+      tolerantDecoding: false,
+      maxResolutionInMP: 1,
+      maxMemoryUsageInMB: 32,
+    })
+    return validDecodedImage(decoded) ? decoded : undefined
+  }
+  if (!hasPngSignature(bytes) || pngDimensions(bytes) === undefined) {
+    return undefined
+  }
+  const decoded = decodePng(bytes, { checkCrc: true })
+  return pngToRgba(decoded)
+}
+
+function hasJpegSignature(bytes: Uint8Array): boolean {
+  return bytes.length >= 3
+    && bytes[0] === 0xff
+    && bytes[1] === 0xd8
+    && bytes[2] === 0xff
+}
+
+/** Read the fixed IHDR before inflating so hostile dimensions are rejected early. */
+function pngDimensions(bytes: Uint8Array): readonly [number, number] | undefined {
+  if (bytes.byteLength < 33 || !hasPngSignature(bytes)) return undefined
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  if (view.getUint32(8) !== 13
+    || bytes[12] !== 0x49
+    || bytes[13] !== 0x48
+    || bytes[14] !== 0x44
+    || bytes[15] !== 0x52) {
+    return undefined
+  }
+  const width = view.getUint32(16)
+  const height = view.getUint32(20)
+  return validDimensions(width, height) ? [width, height] : undefined
+}
+
+function pngToRgba(decoded: DecodedPng): DecodedImage | undefined {
+  if (!validDimensions(decoded.width, decoded.height)) return undefined
+  const indexed = decoded.palette === undefined
+    ? undefined
+    : convertIndexedToRgb(decoded)
+  const data = indexed ?? decoded.data
+  const channels = indexed === undefined
+    ? decoded.channels
+    : decoded.palette?.[0]?.length
+  if (channels === undefined || channels < 1 || channels > 4) return undefined
+  const expectedSamples = decoded.width * decoded.height * channels
+  if (data.length !== expectedSamples) return undefined
+
+  const rgba = new Uint8Array(decoded.width * decoded.height * 4)
+  const sample = (index: number): number => {
+    const value = data[index] ?? 0
+    return data instanceof Uint16Array ? value >>> 8 : value
+  }
+  for (let pixel = 0; pixel < decoded.width * decoded.height; pixel += 1) {
+    const source = pixel * channels
+    const target = pixel * 4
+    if (channels === 1 || channels === 2) {
+      const gray = sample(source)
+      rgba[target] = gray
+      rgba[target + 1] = gray
+      rgba[target + 2] = gray
+      rgba[target + 3] = channels === 2 ? sample(source + 1) : 255
+    } else {
+      rgba[target] = sample(source)
+      rgba[target + 1] = sample(source + 1)
+      rgba[target + 2] = sample(source + 2)
+      rgba[target + 3] = channels === 4 ? sample(source + 3) : 255
+    }
+  }
+  return { width: decoded.width, height: decoded.height, data: rgba }
+}
+
+function validDecodedImage(value: DecodedImage): boolean {
+  return validDimensions(value.width, value.height)
+    && value.data.byteLength === value.width * value.height * 4
+}
+
+function validDimensions(width: number, height: number): boolean {
+  return Number.isSafeInteger(width)
+    && Number.isSafeInteger(height)
+    && width > 0
+    && height > 0
+    && width <= MAX_DECODE_EDGE
+    && height <= MAX_DECODE_EDGE
+    && width * height <= MAX_DECODE_PIXELS
+}
+
 function thumbnail(decoded: {
   readonly width: number
   readonly height: number
   readonly data: Uint8Array
 }): TerminalCover | undefined {
   const { width, height, data } = decoded
-  if (!Number.isSafeInteger(width)
-    || !Number.isSafeInteger(height)
-    || width <= 0
-    || height <= 0
+  if (!validDimensions(width, height)
     || data.byteLength < width * height * 4) {
     return undefined
   }

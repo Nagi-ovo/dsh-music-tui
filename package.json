@@ -64,6 +64,7 @@
   },
   "dependencies": {
     "@dsh-std/sdk": "0.1.0-rc1",
+    "fast-png": "8.0.0",
     "jpeg-js": "0.4.4"
   },
   "peerDependencies": {
