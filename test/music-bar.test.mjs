@@ -30,18 +30,21 @@ test('32, 60, and 120 columns progressively reveal progress, cover, and album', 
     showAlbum: false,
     showProgress: false,
     progressCells: 0,
+    spectrumCells: 0,
   })
   assert.deepEqual(musicBarLayout(60), {
     showCover: true,
     showAlbum: false,
     showProgress: true,
     progressCells: 10,
+    spectrumCells: 0,
   })
   assert.deepEqual(musicBarLayout(120), {
     showCover: true,
     showAlbum: true,
     showProgress: true,
     progressCells: 20,
+    spectrumCells: 24,
   })
 })
 
@@ -86,6 +89,62 @@ test('rich hosts receive a three-row responsive view with narrow controls intact
 
   const wideText = textOf(createRenderer(120).render(fixture.descriptor.component))
   assert.match(wideText, /Live at RiNG/u)
+  fixture.presenter.dispose()
+})
+
+test('80, 96, and 120 columns render bounded spectra while narrow bars release the stream', async () => {
+  const fixture = await richFixture({ spectrumStyle: 'blocks' })
+  const frame = {
+    version: 1,
+    style: 'waterfall',
+    playing: true,
+    bins: Array.from({ length: 32 }, () => 255),
+  }
+  const renderer = createRenderer(79)
+
+  const narrow = renderer.render(fixture.descriptor.component)
+  assert.equal(findNode(narrow, node => node.type === 'Box' && node.props.width === 24), undefined)
+  assert.equal(fixture.events.includes('start spectrum'), false)
+
+  for (const [columns, cells] of [[80, 12], [96, 18], [120, 24]]) {
+    renderer.resize(columns)
+    renderer.render(fixture.descriptor.component)
+    fixture.emitSpectrum(frame)
+    const tree = renderer.render(fixture.descriptor.component)
+    const spectrum = findNode(tree, node => node.type === 'Box'
+      && node.props.width === cells
+      && node.props.height === 3)
+    assert(spectrum, `${columns} columns should reserve a ${cells}x3 spectrum`)
+    assert.deepEqual(spectrum.children.map(textOf), [
+      '█'.repeat(cells),
+      '█'.repeat(cells),
+      '█'.repeat(cells),
+    ])
+    assert.match(textOf(tree), /⏮.*▶.*⏭.*×/u)
+  }
+
+  let updates = 0
+  const unsubscribe = fixture.presenter.store.subscribe(() => { updates += 1 })
+  fixture.emitSpectrum({ ...frame, bins: [...frame.bins] })
+  assert.equal(updates, 0, 'identical frames should not redraw the status tree')
+  unsubscribe()
+
+  renderer.resize(79)
+  renderer.render(fixture.descriptor.component)
+  assert.equal(fixture.events.at(-1), 'stop spectrum')
+
+  renderer.resize(120)
+  renderer.render(fixture.descriptor.component)
+  fixture.emitSpectrum(frame)
+
+  fixture.presenter.hide()
+  assert.deepEqual(fixture.events.slice(-3), ['stop polling', 'stop spectrum', 'dispose view'])
+})
+
+test('spectrum off never opens a background stream', async () => {
+  const fixture = await richFixture({ spectrumStyle: 'off' })
+  createRenderer(120).render(fixture.descriptor.component)
+  assert.equal(fixture.events.includes('start spectrum'), false)
   fixture.presenter.dispose()
 })
 
@@ -299,6 +358,9 @@ test('artwork loads only when its URL changes and hiding aborts the active load'
       sink = value
       return () => {}
     },
+    startSpectrum() {
+      return () => {}
+    },
     async status() {
       sink(first)
       return first
@@ -325,6 +387,7 @@ async function richFixture(options = {}) {
   const events = []
   const owner = {}
   let sink
+  let spectrumSink
   let descriptor
   let identity
   const fixtureSnapshot = options.snapshot ?? snapshot
@@ -333,6 +396,11 @@ async function richFixture(options = {}) {
       sink = value
       events.push('start polling')
       return () => events.push('stop polling')
+    },
+    startSpectrum(value) {
+      spectrumSink = value
+      events.push('start spectrum')
+      return () => events.push('stop spectrum')
     },
     async status() {
       sink(fixtureSnapshot)
@@ -352,20 +420,52 @@ async function richFixture(options = {}) {
   }
   const presenter = new MusicBarPresenter(owner, status, controller, {
     ...(options.coverLoader === undefined ? {} : { coverLoader: options.coverLoader }),
+    ...(options.spectrumStyle === undefined ? {} : { spectrumStyle: options.spectrumStyle }),
   })
   const showResult = await presenter.show()
-  return { descriptor, identity, owner, presenter, events, showResult }
+  return {
+    descriptor,
+    identity,
+    owner,
+    presenter,
+    events,
+    showResult,
+    emitSpectrum(frame) {
+      assert(spectrumSink, 'spectrum stream should be active')
+      spectrumSink(frame)
+    },
+  }
 }
 
 function createRenderer(columns, options = {}) {
   const state = []
+  const effects = []
   let cursor = 0
+  let effectCursor = 0
+  let currentColumns = columns
+  let pendingEffects = []
   const React = {
     createElement(type, props, ...children) {
       return { type, props: props ?? {}, children }
     },
     useSyncExternalStore(_subscribe, getSnapshot) {
       return getSnapshot()
+    },
+    useEffect(effect, dependencies) {
+      const index = effectCursor
+      effectCursor += 1
+      const previous = effects[index]
+      const changed = previous === undefined
+        || dependencies.length !== previous.dependencies.length
+        || dependencies.some((value, dependency) => !Object.is(value, previous.dependencies[dependency]))
+      if (!changed) return
+      pendingEffects.push(() => {
+        previous?.cleanup?.()
+        effects[index] = {
+          dependencies: [...dependencies],
+          cleanup: effect(),
+        }
+      })
     },
     useState(initial) {
       const index = cursor
@@ -378,12 +478,19 @@ function createRenderer(columns, options = {}) {
     Box: 'Box',
     ...(options.image ? { Image: 'Image' } : {}),
     Text: 'Text',
-    useTerminalSize: () => ({ columns, rows: 40 }),
+    useTerminalSize: () => ({ columns: currentColumns, rows: 40 }),
   }
   return {
     render(component) {
       cursor = 0
-      return component({ React, ui })
+      effectCursor = 0
+      pendingEffects = []
+      const tree = component({ React, ui })
+      for (const commit of pendingEffects) commit()
+      return tree
+    },
+    resize(nextColumns) {
+      currentColumns = nextColumns
     },
   }
 }

@@ -38,6 +38,10 @@ test('a rich status presenter keeps activation identity and cleans up polling an
       events.push(['start polling'])
       return () => events.push(['stop polling'])
     },
+    startSpectrum() {
+      events.push(['start spectrum'])
+      return () => events.push(['stop spectrum'])
+    },
     async status() {
       sink(snapshot)
       return snapshot

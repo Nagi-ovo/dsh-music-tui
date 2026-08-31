@@ -1,8 +1,15 @@
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
+import { performance } from 'node:perf_hooks'
 
 const MAX_OUTPUT_BYTES = 64 * 1024
 const MAX_TEXT_CODE_POINTS = 96
 const MAX_COVER_URL_CODE_POINTS = 2048
+const SPECTRUM_PROTOCOL_VERSION = 1
+const SPECTRUM_BIN_COUNT = 32
+const MAX_SPECTRUM_LINE_BYTES = 2048
+const MAX_STREAM_STDERR_BYTES = 4096
+const MAX_SPECTRUM_FPS = 20
+const MAX_SPECTRUM_BURST_FRAMES = MAX_SPECTRUM_FPS * 2
 
 export type YpmControlCommand = 'toggle' | 'next' | 'prev'
 export type YpmSource = 'tui'
@@ -27,6 +34,13 @@ export interface YpmSnapshot {
 export interface YpmAck {
   readonly ok: true
   readonly source: YpmSource
+}
+
+export interface YpmSpectrumFrame {
+  readonly version: 1
+  readonly style: string
+  readonly playing: boolean
+  readonly bins: readonly number[]
 }
 
 export type YpmErrorKind = 'not-found' | 'timeout' | 'process' | 'protocol' | 'aborted'
@@ -58,10 +72,18 @@ export type YpmProcessRunner = (
   options: YpmRunOptions,
 ) => Promise<YpmProcessResult>
 
+export type YpmSpectrumRunner = (
+  executable: string,
+  argv: readonly string[],
+  options: { readonly signal?: AbortSignal },
+  onLine: (line: string) => void,
+) => Promise<void>
+
 export interface YpmClientOptions {
   readonly executable?: string
   readonly timeoutMs?: number
   readonly runner?: YpmProcessRunner
+  readonly spectrumRunner?: YpmSpectrumRunner
 }
 
 /** Invoke the public ypm CLI with no shell and a bounded output buffer. */
@@ -122,15 +144,142 @@ export const execFileRunner: YpmProcessRunner = (executable, argv, options) => {
   })
 }
 
+/** Spawn one bounded NDJSON stream without a shell. */
+export const spawnSpectrumRunner: YpmSpectrumRunner = (executable, argv, options, onLine) => {
+  return new Promise((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(new YpmError('aborted', 'ypm spectrum stream was cancelled'))
+      return
+    }
+
+    let child: ReturnType<typeof spawn>
+    try {
+      child = spawn(executable, [...argv], {
+        shell: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      })
+    } catch (error) {
+      reject(new YpmError('process', 'ypm spectrum stream failed', cleanExternalText(errorMessage(error), 160)))
+      return
+    }
+    const childStdout = child.stdout
+    const childStderr = child.stderr
+    if (childStdout === null || childStderr === null) {
+      child.kill()
+      reject(new YpmError('process', 'ypm spectrum stream did not expose piped output'))
+      return
+    }
+
+    let settled = false
+    let stdout = Buffer.alloc(0)
+    let stderr = Buffer.alloc(0)
+    let forcedError: YpmError | undefined
+    let killTimer: ReturnType<typeof setTimeout> | undefined
+    const cleanup = (): void => {
+      if (killTimer !== undefined) clearTimeout(killTimer)
+      options.signal?.removeEventListener('abort', onAbort)
+    }
+    const finish = (error?: YpmError): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      if (error === undefined) resolve()
+      else reject(error)
+    }
+    const stopChild = (error: YpmError): void => {
+      if (settled || forcedError !== undefined) return
+      forcedError = error
+      child.kill('SIGTERM')
+      killTimer = setTimeout(() => child.kill('SIGKILL'), 250)
+      killTimer.unref()
+    }
+    const onAbort = (): void => {
+      stopChild(new YpmError('aborted', 'ypm spectrum stream was cancelled'))
+    }
+    const emitLines = (): void => {
+      while (true) {
+        const newline = stdout.indexOf(0x0a)
+        if (newline < 0) break
+        if (newline > MAX_SPECTRUM_LINE_BYTES) {
+          stopChild(new YpmError('protocol', 'ypm returned an oversized spectrum frame'))
+          return
+        }
+        const line = stdout.subarray(0, newline).toString('utf8').trim()
+        stdout = stdout.subarray(newline + 1)
+        if (line === '') continue
+        try {
+          onLine(line)
+        } catch (error) {
+          stopChild(error instanceof YpmError
+            ? error
+            : new YpmError('protocol', 'ypm returned an invalid spectrum frame'))
+          return
+        }
+      }
+      if (stdout.length > MAX_SPECTRUM_LINE_BYTES) {
+        stopChild(new YpmError('protocol', 'ypm returned an oversized spectrum frame'))
+      }
+    }
+
+    childStdout.on('data', (chunk: Buffer) => {
+      if (settled || forcedError !== undefined) return
+      stdout = Buffer.concat([stdout, chunk])
+      emitLines()
+    })
+    childStderr.on('data', (chunk: Buffer) => {
+      if (stderr.length >= MAX_STREAM_STDERR_BYTES) return
+      stderr = Buffer.concat([
+        stderr,
+        chunk.subarray(0, MAX_STREAM_STDERR_BYTES - stderr.length),
+      ])
+    })
+    child.once('error', (error: NodeJS.ErrnoException) => {
+      finish(forcedError ?? new YpmError(
+        error.code === 'ENOENT' ? 'not-found' : 'process',
+        error.code === 'ENOENT'
+          ? `ypm executable was not found: ${executable}`
+          : 'ypm spectrum stream failed',
+        cleanExternalText(error.message, 160) || undefined,
+      ))
+    })
+    child.once('close', (code) => {
+      if (forcedError !== undefined) {
+        finish(forcedError)
+        return
+      }
+      if (code === 0) {
+        if (stdout.length > 0) {
+          stdout = Buffer.concat([stdout, Buffer.from('\n')])
+          emitLines()
+        }
+        finish(forcedError)
+        return
+      }
+      finish(new YpmError(
+        'process',
+        'ypm spectrum stream ended unexpectedly',
+        cleanExternalText(stderr.toString('utf8'), 160) || undefined,
+      ))
+    })
+    if (options.signal !== undefined) {
+      options.signal.addEventListener('abort', onAbort, { once: true })
+      if (options.signal.aborted) onAbort()
+    }
+  })
+}
+
 export class YpmClient {
   readonly executable: string
   readonly timeoutMs: number
   private readonly runner: YpmProcessRunner
+  private readonly spectrumRunner: YpmSpectrumRunner
 
   constructor(options: YpmClientOptions = {}) {
     this.executable = options.executable?.trim() || 'ypm'
     this.timeoutMs = clampInteger(options.timeoutMs ?? 3000, 250, 30_000)
     this.runner = options.runner ?? execFileRunner
+    this.spectrumRunner = options.spectrumRunner ?? spawnSpectrumRunner
   }
 
   async status(signal?: AbortSignal): Promise<YpmSnapshot> {
@@ -149,6 +298,101 @@ export class YpmClient {
     }
     const output = await this.run('seek', [formatSeekSeconds(positionMs)], signal)
     return parseAck(output)
+  }
+
+  async watchSpectrum(
+    onFrame: (frame: YpmSpectrumFrame) => void,
+    signal?: AbortSignal,
+    fps = 12,
+  ): Promise<void> {
+    if (!Number.isInteger(fps) || fps < 1 || fps > MAX_SPECTRUM_FPS) {
+      throw new YpmError('protocol', `spectrum fps must be between 1 and ${MAX_SPECTRUM_FPS}`)
+    }
+    const streamController = new AbortController()
+    const streamSignal = signal === undefined
+      ? streamController.signal
+      : AbortSignal.any([signal, streamController.signal])
+    const frameIntervalMs = 1000 / fps
+    let lastFrameAt = Number.NEGATIVE_INFINITY
+    let pendingFrame: YpmSpectrumFrame | undefined
+    let frameTimer: ReturnType<typeof setTimeout> | undefined
+    let deliveryError: YpmError | undefined
+    let rateTokens = MAX_SPECTRUM_BURST_FRAMES
+    let rateCheckedAt = performance.now()
+
+    const failDelivery = (error: unknown): YpmError => {
+      const failure = error instanceof YpmError
+        ? error
+        : new YpmError('protocol', 'spectrum consumer rejected a frame')
+      deliveryError = failure
+      streamController.abort(failure)
+      return failure
+    }
+    const deliver = (frame: YpmSpectrumFrame): void => {
+      lastFrameAt = performance.now()
+      try {
+        onFrame(frame)
+      } catch (error) {
+        throw failDelivery(error)
+      }
+    }
+    const flushPending = (): void => {
+      frameTimer = undefined
+      if (pendingFrame === undefined || streamSignal.aborted) return
+      const remaining = frameIntervalMs - (performance.now() - lastFrameAt)
+      if (remaining > 0) {
+        frameTimer = setTimeout(flushPending, Math.ceil(remaining))
+        return
+      }
+      const frame = pendingFrame
+      pendingFrame = undefined
+      try {
+        deliver(frame)
+      } catch {
+        // `deliver` aborts the stream; the awaited runner carries the failure.
+      }
+    }
+    const queue = (frame: YpmSpectrumFrame): void => {
+      const now = performance.now()
+      if (frameTimer === undefined && now - lastFrameAt >= frameIntervalMs) {
+        deliver(frame)
+        return
+      }
+      pendingFrame = frame
+      if (frameTimer !== undefined) return
+      const remaining = Math.max(0, frameIntervalMs - (now - lastFrameAt))
+      frameTimer = setTimeout(flushPending, Math.ceil(remaining))
+    }
+    const acceptLine = (line: string): void => {
+      const now = performance.now()
+      const elapsed = Math.max(0, now - rateCheckedAt)
+      rateCheckedAt = now
+      rateTokens = Math.min(
+        MAX_SPECTRUM_BURST_FRAMES,
+        rateTokens + elapsed * MAX_SPECTRUM_FPS / 1000,
+      )
+      if (rateTokens < 1) {
+        throw new YpmError('protocol', 'ypm spectrum stream exceeded the supported frame rate')
+      }
+      rateTokens -= 1
+      queue(parseSpectrumFrame(line))
+    }
+
+    try {
+      await this.spectrumRunner(
+        this.executable,
+        ['--json', '--tui', 'spectrum', '--fps', String(fps)],
+        { signal: streamSignal },
+        acceptLine,
+      )
+      if (deliveryError !== undefined) throw deliveryError
+    } catch (error) {
+      if (deliveryError !== undefined) throw deliveryError
+      throw error
+    } finally {
+      if (frameTimer !== undefined) clearTimeout(frameTimer)
+      pendingFrame = undefined
+    }
   }
 
   private async run(
@@ -207,6 +451,25 @@ export function parseAck(source: string): YpmAck {
     throw new YpmError('protocol', 'ypm returned an invalid control response')
   }
   return Object.freeze({ ok: true, source: 'tui' })
+}
+
+export function parseSpectrumFrame(source: string): YpmSpectrumFrame {
+  const value = parseObject(source)
+  if (value.version !== SPECTRUM_PROTOCOL_VERSION
+    || typeof value.style !== 'string'
+    || !/^[a-z][a-z0-9-]{0,23}$/u.test(value.style)
+    || typeof value.playing !== 'boolean'
+    || !Array.isArray(value.bins)
+    || value.bins.length !== SPECTRUM_BIN_COUNT
+    || !value.bins.every(spectrumBin)) {
+    throw new YpmError('protocol', 'ypm returned an invalid spectrum frame')
+  }
+  return Object.freeze({
+    version: 1,
+    style: value.style,
+    playing: value.playing,
+    bins: Object.freeze([...value.bins]),
+  })
 }
 
 export function playbackLine(snapshot: YpmSnapshot): string | undefined {
@@ -268,6 +531,10 @@ function optionalBoolean(value: unknown): value is boolean | undefined {
 
 function optionalIconStyle(value: unknown): value is YpmIconStyle | undefined {
   return value === undefined || value === 'unicode' || value === 'nerd'
+}
+
+function spectrumBin(value: unknown): value is number {
+  return Number.isInteger(value) && typeof value === 'number' && value >= 0 && value <= 255
 }
 
 function nonNegativeInteger(value: unknown): value is number {

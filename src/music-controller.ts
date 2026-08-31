@@ -1,11 +1,16 @@
+import { performance } from 'node:perf_hooks'
 import {
   YpmClient,
   type YpmAck,
   type YpmControlCommand,
   type YpmSnapshot,
+  type YpmSpectrumFrame,
 } from './ypm-client.js'
 
 const OFFLINE_BACKOFF_MS = [5000, 10_000] as const
+const SPECTRUM_RECONNECT_MS = [1000, 5000, 15_000, 30_000] as const
+const SPECTRUM_HEALTHY_FRAME_COUNT = 24
+const SPECTRUM_HEALTHY_STREAM_MS = 2000
 
 export interface MusicControlResult {
   readonly ack: YpmAck
@@ -13,6 +18,7 @@ export interface MusicControlResult {
 }
 
 export type MusicStatusSink = (snapshot: YpmSnapshot | undefined) => void
+export type MusicSpectrumSink = (frame: YpmSpectrumFrame | undefined) => void
 
 /** Serialize player operations and own the non-overlapping status poll loop. */
 export class MusicController {
@@ -20,6 +26,7 @@ export class MusicController {
   private operationTail: Promise<void> = Promise.resolve()
   private timer: ReturnType<typeof setTimeout> | undefined
   private activePoll: AbortController | undefined
+  private spectrumStream: AbortController | undefined
   private generation = 0
   private failureCount = 0
   private sink: MusicStatusSink | undefined
@@ -43,6 +50,59 @@ export class MusicController {
         this.sink = undefined
         this.cancelPoll()
       }
+    }
+  }
+
+  startSpectrum(sink: MusicSpectrumSink): () => void {
+    if (this.disposed) return () => {}
+    this.spectrumStream?.abort()
+    const controller = new AbortController()
+    this.spectrumStream = controller
+    const signal = AbortSignal.any([this.lifecycle.signal, controller.signal])
+    void this.runSpectrum(sink, controller, signal).finally(() => {
+      if (this.spectrumStream === controller) this.spectrumStream = undefined
+    })
+    let active = true
+    return () => {
+      if (!active) return
+      active = false
+      controller.abort()
+      if (this.spectrumStream === controller) this.spectrumStream = undefined
+    }
+  }
+
+  private async runSpectrum(
+    sink: MusicSpectrumSink,
+    controller: AbortController,
+    signal: AbortSignal,
+  ): Promise<void> {
+    let failureCount = 0
+    while (!signal.aborted && !this.disposed) {
+      const startedAt = performance.now()
+      let receivedFrames = 0
+      let healthy = false
+      try {
+        await this.client.watchSpectrum(frame => {
+          if (controller.signal.aborted || this.disposed) return
+          receivedFrames += 1
+          if (!healthy
+            && receivedFrames >= SPECTRUM_HEALTHY_FRAME_COUNT
+            && performance.now() - startedAt >= SPECTRUM_HEALTHY_STREAM_MS) {
+            healthy = true
+            failureCount = 0
+          }
+          sink(frame)
+        }, signal)
+      } catch {
+        // Missing, old, and restarted players all recover at this process boundary.
+      }
+      if (signal.aborted || this.disposed) return
+      sink(undefined)
+      const delay = SPECTRUM_RECONNECT_MS[
+        Math.min(failureCount, SPECTRUM_RECONNECT_MS.length - 1)
+      ]!
+      failureCount += 1
+      await abortableDelay(delay, signal)
     }
   }
 
@@ -112,6 +172,8 @@ export class MusicController {
     this.cancelTimer()
     this.activePoll?.abort()
     this.activePoll = undefined
+    this.spectrumStream?.abort()
+    this.spectrumStream = undefined
     this.lifecycle.abort()
     this.sink = undefined
   }
@@ -200,4 +262,19 @@ export class MusicController {
 
 function combineSignals(first: AbortSignal, second?: AbortSignal): AbortSignal {
   return second === undefined ? first : AbortSignal.any([first, second])
+}
+
+function abortableDelay(delayMs: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve()
+  return new Promise(resolve => {
+    const timer = setTimeout(finish, delayMs)
+    const onAbort = (): void => finish()
+    function finish(): void {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    if (signal.aborted) finish()
+  })
 }

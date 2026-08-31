@@ -14,7 +14,7 @@ the player automatically.
 - `/music next`: send next track
 - `/music prev`: send previous track
 - `/music seek <seconds>`: jump to an absolute position, for example `/music seek 90.5`
-- Show artwork, title, artist, progress, and previous/play-pause/next/close controls
+- Show artwork, title, artist, progress, a live spectrum, and previous/play-pause/next/close controls
 
 In fullscreen mode, mouse controls mirror slash commands: click the progress
 gauge to seek, or drag for a local preview and send one seek on release. Use
@@ -28,6 +28,10 @@ fall back to Unicode when an older YPM build does not report it.
 When the host supports Kitty graphics, artwork is shown as a smooth image.
 Other terminals, inline and accessibility modes, and terminal multiplexers
 automatically use the same-size half-block thumbnail with no extra setup.
+The real audio spectrum is subscribed only at 80 columns or wider. It uses
+12/18/24 cells at 80/96/120 columns; narrowing releases this plugin's stream,
+so YPM can stop the analyzer when its own spectrum is hidden. Compact `blocks`, `led`, `braille`,
+and `shade` styles are built in, with an option to follow matching YPM styles.
 
 Control responses say that a command was sent, not that playback has already
 changed. The YesPlayMusic CLI acknowledgement only confirms receipt; the plugin
@@ -38,7 +42,7 @@ then refreshes status instead of treating the acknowledgement as final state.
 - Node.js `^22.19 || >=24`
 - [dsh-TUI](https://github.com/ccch1mneyyy/dsh-TUI) `>=0.9.2 <0.11.0`
 - [YesPlayMusic TUI](https://github.com/nagi-studio/YesPlayMusic) and its `ypm`
-  CLI (currently verified with `ypm 0.10.0`)
+  CLI (currently verified with `ypm 0.11.0`; live spectrum requires this version)
 - macOS or Linux; `ypm` TUI remote control uses a local Unix socket
 
 Confirm that `ypm` is on `PATH`:
@@ -84,6 +88,7 @@ This plugin never starts or stops YesPlayMusic for you.
 | `showStatus` | `true` | Enable the bar opened by `/music`; it still starts hidden |
 | `pollIntervalMs` | `3000` | Online polling interval (1000–60000 ms) |
 | `timeoutMs` | `3000` | Hard deadline per CLI call (250–30000 ms) |
+| `spectrumStyle` | `follow` | `off` / `follow` / `blocks` / `led` / `braille` / `shade` |
 
 With `showStatus: false`, no bar is registered. `/music` and `/music show` then
 degrade to one detailed result; status and playback controls remain available.
@@ -100,6 +105,7 @@ Override the complete row configuration in the profile's own
     showStatus: true
     pollIntervalMs: 3000
     timeoutMs: 3000
+    spectrumStyle: follow
 ```
 
 ## Architecture and trust boundary
@@ -109,7 +115,7 @@ dsh-TUI /music + status
           │
           ▼
   @dsh-tui-ecosystem/music
-          │ execFile(argv), no shell
+          │ execFile / spawn(argv), no shell
           ▼
        ypm --json --tui …
           │
@@ -128,6 +134,15 @@ dsh-TUI /music + status
   default. Playing progress advances locally once per second and freezes while
   paused. One failed read retains the previous state; two consecutive failures
   clear it. Offline polling then backs off.
+- The spectrum subscribes to the public
+  `ypm --json --tui spectrum --fps 12` NDJSON stream only while the bar is
+  visible, a track exists, and the terminal is at least 80 columns wide. The
+  protocol carries 32 bounded 0–255 bins, never PCM or a private socket.
+  Disconnects clear stale pixels and reconnect with bounded backoff; hiding,
+  narrowing, or unloading aborts the child process.
+- `follow` accepts YPM's `blocks`, `led`, `braille`, and `shade` names and
+  safely falls back to `blocks` for other styles. Duplicate frames do not
+  trigger redundant TUI renders.
 - Newer `ypm` builds explicitly advertise seeking with `seekable` and project
   the user's selected glyph palette through `iconStyle`. Older output keeps
   progress readable but non-interactive and uses Unicode controls.
@@ -171,8 +186,8 @@ dsh plugin --profile dsh-tui add "$PWD"
 ```
 
 Then test show/hide/status/toggle/next/prev/seek, fullscreen progress click and drag,
-32/60/120-column layouts, legacy-host fallback, offline, missing-`ypm`, and
-plugin-unload behavior.
+32/60/80/96/120-column layouts and all four spectrum styles, legacy-host fallback,
+offline, missing-`ypm`, and plugin-unload behavior.
 
 ## License
 

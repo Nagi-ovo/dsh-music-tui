@@ -12,3 +12,4 @@
         showStatus: true
         pollIntervalMs: 3000
         timeoutMs: 3000
+        spectrumStyle: follow

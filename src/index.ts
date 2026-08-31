@@ -5,6 +5,7 @@ import type {} from '@deepseek-harness-tui/dsh-tui/plugin-host'
 import { createMusicCommand } from './music-command.js'
 import { MusicController } from './music-controller.js'
 import { createMusicStatus } from './music-status.js'
+import type { MusicSpectrumStyle } from './music-spectrum.js'
 import {
   attachLegacyCommand,
   exposeMusicController,
@@ -23,6 +24,8 @@ export interface Config {
   pollIntervalMs?: number
   /** Hard deadline for one ypm process. */
   timeoutMs?: number
+  /** Compact spectrum style; follow reuses supported YPM choices. */
+  spectrumStyle?: MusicSpectrumStyle
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -30,6 +33,7 @@ export const Config: Schema<Config> = Schema.object({
   showStatus: Schema.boolean().default(true),
   pollIntervalMs: Schema.number().min(1000).max(60_000).step(500).default(3000),
   timeoutMs: Schema.number().min(250).max(30_000).step(250).default(3000),
+  spectrumStyle: Schema.union(['off', 'follow', 'blocks', 'led', 'braille', 'shade']).default('follow'),
 })
 
 export function apply(ctx: Context, config: Config = {}): void {
@@ -42,7 +46,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   const status = ctx.get('tuiStatus', false)
   const display = status === undefined || !resolved.showStatus
     ? undefined
-    : createMusicStatus(ctx, status, controller)
+    : createMusicStatus(ctx, status, controller, resolved.spectrumStyle)
   ctx.effect(() => {
     const hideController = exposeMusicController(controller, display)
     return () => {
@@ -103,6 +107,7 @@ function resolveConfig(config: Config): Required<Config> {
     showStatus: config.showStatus ?? true,
     pollIntervalMs: clamp(config.pollIntervalMs ?? 3000, 1000, 60_000),
     timeoutMs: clamp(config.timeoutMs ?? 3000, 250, 30_000),
+    spectrumStyle: config.spectrumStyle ?? 'follow',
   }
 }
 

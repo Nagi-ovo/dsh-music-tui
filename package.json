@@ -1,7 +1,7 @@
 {
   "name": "@dsh-tui-ecosystem/music",
   "version": "0.1.0",
-  "description": "Control YesPlayMusic TUI from dsh-TUI with /music commands and a compact now-playing bar",
+  "description": "Control YesPlayMusic TUI from dsh-TUI with /music, artwork, seeking, and a live spectrum bar",
   "keywords": [
     "deepseek-harness",
     "dsh",

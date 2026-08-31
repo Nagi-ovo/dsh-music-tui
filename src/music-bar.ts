@@ -2,9 +2,16 @@ import type { Context } from '@deepseek-ai/cordis'
 import { CoverArtLoader, type TerminalCover } from './cover-art.js'
 import type { MusicControlResult, MusicController } from './music-controller.js'
 import {
+  renderSpectrum,
+  resolveSpectrumStyle,
+  spectrumCells,
+  type MusicSpectrumStyle,
+} from './music-spectrum.js'
+import {
   describeYpmError,
   type YpmControlCommand,
   type YpmSnapshot,
+  type YpmSpectrumFrame,
 } from './ypm-client.js'
 
 const STATUS_KEY = 'dsh-music-tui:playback'
@@ -24,6 +31,7 @@ export interface MusicBarLayout {
   readonly showAlbum: boolean
   readonly showProgress: boolean
   readonly progressCells: number
+  readonly spectrumCells: number
 }
 
 export interface MusicBarState {
@@ -31,6 +39,7 @@ export interface MusicBarState {
   readonly observedAtMs: number
   readonly renderedAtMs: number
   readonly cover: TerminalCover | undefined
+  readonly spectrum: YpmSpectrumFrame | undefined
   readonly pending: MusicPendingOperation | undefined
   readonly previewPositionMs: number | undefined
   readonly error: string | undefined
@@ -50,6 +59,7 @@ export interface MusicDisplayShowResult {
 
 interface StatusViewReact {
   createElement(type: unknown, props: Readonly<Record<string, unknown>> | null, ...children: unknown[]): unknown
+  useEffect(effect: () => void | (() => void), dependencies: readonly unknown[]): void
   useSyncExternalStore<T>(
     subscribe: (listener: () => void) => () => void,
     getSnapshot: () => T,
@@ -85,6 +95,7 @@ const EMPTY_STATE: MusicBarState = Object.freeze({
   observedAtMs: 0,
   renderedAtMs: 0,
   cover: undefined,
+  spectrum: undefined,
   pending: undefined,
   previewPositionMs: undefined,
   error: undefined,
@@ -127,8 +138,11 @@ export class MusicBarPresenter implements MusicDisplay {
   private readonly lifecycle = new AbortController()
   private readonly coverLoader: CoverArtLoader
   private readonly now: () => number
+  private readonly spectrumStyle: MusicSpectrumStyle
   private visible = false
+  private spectrumDemand = false
   private stopPolling: (() => void) | undefined
+  private stopSpectrum: (() => void) | undefined
   private stopView: (() => void) | undefined
   private tickTimer: ReturnType<typeof setInterval> | undefined
   private errorTimer: ReturnType<typeof setTimeout> | undefined
@@ -144,10 +158,12 @@ export class MusicBarPresenter implements MusicDisplay {
     options: {
       readonly coverLoader?: CoverArtLoader
       readonly now?: () => number
+      readonly spectrumStyle?: MusicSpectrumStyle
     } = {},
   ) {
     this.coverLoader = options.coverLoader ?? new CoverArtLoader()
     this.now = options.now ?? Date.now
+    this.spectrumStyle = options.spectrumStyle ?? 'follow'
   }
 
   async show(signal?: AbortSignal): Promise<MusicDisplayShowResult> {
@@ -161,6 +177,7 @@ export class MusicBarPresenter implements MusicDisplay {
     this.visible = false
     this.stopPolling?.()
     this.stopPolling = undefined
+    this.setSpectrumDemand(false)
     this.stopView?.()
     this.stopView = undefined
     this.stopTick()
@@ -213,7 +230,8 @@ export class MusicBarPresenter implements MusicDisplay {
         previewSeek: positionMs => this.previewSeek(positionMs),
         seek: positionMs => { void this.seekFromView(positionMs) },
         close: () => this.hide(),
-      }),
+        spectrumDemand: demand => this.setSpectrumDemand(demand),
+      }, this.spectrumStyle),
     }, this.owner)
     if (stopView === undefined) return false
     this.stopView = stopView
@@ -223,6 +241,10 @@ export class MusicBarPresenter implements MusicDisplay {
     } catch (error) {
       this.visible = false
       this.stopView = undefined
+      this.stopPolling?.()
+      this.stopPolling = undefined
+      this.stopSpectrum?.()
+      this.stopSpectrum = undefined
       stopView()
       throw error
     }
@@ -245,12 +267,34 @@ export class MusicBarPresenter implements MusicDisplay {
       observedAtMs: time,
       renderedAtMs: time,
       cover: (snapshot.coverUrl ?? null) === this.coverUrl ? previous.cover : undefined,
+      spectrum: previous.spectrum,
       pending: previous.pending,
       previewPositionMs: undefined,
       error: previous.error,
     })
     this.startTick(snapshot)
     this.loadCover(snapshot.coverUrl ?? null)
+  }
+
+  private receiveSpectrum(spectrum: YpmSpectrumFrame | undefined): void {
+    if (!this.visible || this.disposed) return
+    const current = this.store.getSnapshot()
+    if (sameSpectrumFrame(current.spectrum, spectrum)) return
+    this.replace({ ...current, spectrum })
+  }
+
+  private setSpectrumDemand(demand: boolean): void {
+    const next = demand && this.spectrumStyle !== 'off' && this.visible && !this.disposed
+    if (this.spectrumDemand === next) return
+    this.spectrumDemand = next
+    this.stopSpectrum?.()
+    this.stopSpectrum = undefined
+    if (next) {
+      this.stopSpectrum = this.controller.startSpectrum(frame => this.receiveSpectrum(frame))
+      return
+    }
+    const current = this.store.getSnapshot()
+    if (current.spectrum !== undefined) this.replace({ ...current, spectrum: undefined })
   }
 
   private startTick(snapshot: YpmSnapshot): void {
@@ -359,6 +403,7 @@ export function musicBarLayout(columns: number): MusicBarLayout {
     showAlbum: columns >= 80,
     showProgress: columns >= 44,
     progressCells: columns >= 100 ? 20 : columns >= 52 ? 10 : 0,
+    spectrumCells: spectrumCells(columns),
   })
 }
 
@@ -414,15 +459,31 @@ function createMusicBarView(
     readonly previewSeek: (positionMs: number | undefined) => void
     readonly seek: (positionMs: number) => void
     readonly close: () => void
+    readonly spectrumDemand: (demand: boolean) => void
   },
+  spectrumPreference: MusicSpectrumStyle,
 ): (props: StatusViewProps) => unknown {
   return ({ React, ui }) => {
     const state = React.useSyncExternalStore(store.subscribe, store.getSnapshot)
     const [hovered, setHovered] = React.useState<MusicHoverTarget | undefined>(undefined)
     const { columns } = ui.useTerminalSize()
-    const snapshot = state.snapshot
-    if (snapshot === undefined || snapshot.title === null) return null
     const layout = musicBarLayout(columns)
+    const snapshot = state.snapshot
+    const wantsSpectrum = spectrumPreference !== 'off'
+      && layout.spectrumCells > 0
+      && snapshot?.title != null
+    React.useEffect(() => {
+      actions.spectrumDemand(wantsSpectrum)
+      return () => actions.spectrumDemand(false)
+    }, [wantsSpectrum])
+    if (snapshot === undefined || snapshot.title === null) return null
+    const spectrumFrame = state.spectrum
+    const spectrumStyle = spectrumFrame === undefined
+      ? undefined
+      : resolveSpectrumStyle(spectrumPreference, spectrumFrame.style)
+    const spectrum = spectrumFrame === undefined || spectrumStyle === undefined || layout.spectrumCells === 0
+      ? null
+      : spectrumNode(React, ui, spectrumFrame, spectrumStyle, layout.spectrumCells)
     const body = React.createElement(
       ui.Box,
       { flexDirection: 'column', flexGrow: 1, flexShrink: 1, minWidth: 0, height: 3 },
@@ -477,15 +538,54 @@ function createMusicBarView(
         ),
       ),
     )
-    if (!layout.showCover) return body
+    if (!layout.showCover && spectrum === null) return body
     return React.createElement(
       ui.Box,
       { flexDirection: 'row', width: '100%', height: 3 },
-      coverNode(React, ui, state.cover),
-      React.createElement(ui.Box, { width: 1, flexShrink: 0 }),
+      layout.showCover ? coverNode(React, ui, state.cover) : null,
+      layout.showCover ? React.createElement(ui.Box, { width: 1, flexShrink: 0 }) : null,
       body,
+      spectrum === null ? null : React.createElement(ui.Box, { width: 1, flexShrink: 0 }),
+      spectrum,
     )
   }
+}
+
+function sameSpectrumFrame(
+  left: YpmSpectrumFrame | undefined,
+  right: YpmSpectrumFrame | undefined,
+): boolean {
+  if (left === right) return true
+  if (left === undefined || right === undefined) return false
+  return left.version === right.version
+    && left.style === right.style
+    && left.playing === right.playing
+    && left.bins.length === right.bins.length
+    && left.bins.every((value, index) => value === right.bins[index])
+}
+
+function spectrumNode(
+  React: StatusViewReact,
+  ui: StatusViewUi,
+  frame: YpmSpectrumFrame,
+  style: Exclude<MusicSpectrumStyle, 'off' | 'follow'>,
+  cells: number,
+): unknown {
+  const rows = renderSpectrum(frame, style, cells)
+  return React.createElement(
+    ui.Box,
+    { flexDirection: 'column', width: cells, height: 3, flexShrink: 0 },
+    ...rows.map((row, index) => React.createElement(
+      ui.Text,
+      {
+        key: `spectrum-${index}`,
+        color: 'suggestion',
+        dimColor: !frame.playing,
+        wrap: 'truncate',
+      },
+      row,
+    )),
+  )
 }
 
 function coverNode(React: StatusViewReact, ui: StatusViewUi, cover: TerminalCover | undefined): unknown {
