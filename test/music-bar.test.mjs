@@ -97,7 +97,7 @@ test('rich hosts receive a three-row responsive view with narrow controls intact
   fixture.presenter.dispose()
 })
 
-test('80, 96, and 120 columns render bounded spectra while narrow bars release the stream', async () => {
+test('spectra grow on wide terminals while narrow bars release the stream', async () => {
   const fixture = await richFixture({ spectrumStyle: 'blocks' })
   const frame = {
     version: 1,
@@ -112,7 +112,14 @@ test('80, 96, and 120 columns render bounded spectra while narrow bars release t
   assert.equal(fixture.events.includes('start spectrum'), false)
   assertTrailingClose(narrow)
 
-  for (const [columns, cells] of [[80, 12], [96, 18], [120, 24]]) {
+  for (const [columns, cells] of [
+    [80, 12],
+    [96, 18],
+    [120, 24],
+    [140, 34],
+    [168, 48],
+    [240, 48],
+  ]) {
     renderer.resize(columns)
     renderer.render(fixture.descriptor.component)
     fixture.emitSpectrum(frame)
@@ -146,7 +153,7 @@ test('80, 96, and 120 columns render bounded spectra while narrow bars release t
   fixture.emitSpectrum({ ...frame, playing: false })
   const pausedTree = renderer.render(fixture.descriptor.component)
   const pausedSpectrum = findNode(pausedTree, node => node.type === 'Box'
-    && node.props.width === 24
+    && node.props.width === 48
     && node.props.height === 3)
   assert(pausedSpectrum)
   assert.deepEqual(pausedSpectrum.children.map(node => node.props.dimColor), [true, true, true])

@@ -17,10 +17,10 @@ const frame = Object.freeze({
   bins,
 })
 
-test('spectrum width is reserved only when the status bar has room', () => {
+test('spectrum width grows on wide terminals without taking over the bar', () => {
   assert.deepEqual(
-    [79, 80, 95, 96, 119, 120].map(spectrumCells),
-    [0, 12, 12, 18, 18, 24],
+    [79, 80, 95, 96, 119, 120, 121, 122, 140, 168, 240].map(spectrumCells),
+    [0, 12, 12, 18, 18, 24, 24, 25, 34, 48, 48],
   )
 })
 

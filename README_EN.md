@@ -29,7 +29,8 @@ When the host supports Kitty graphics, artwork is shown as a smooth image.
 Other terminals, inline and accessibility modes, and terminal multiplexers
 automatically use the same-size half-block thumbnail with no extra setup.
 The real audio spectrum is subscribed only at 80 columns or wider. It uses
-12/18/24 cells at 80/96/120 columns; narrowing releases this plugin's stream,
+12/18/24 cells at 80/96/120 columns, then adds one cell for every two columns
+up to 48 cells. Narrowing releases this plugin's stream,
 so YPM can stop the analyzer when its own spectrum is hidden. Compact `blocks`, `led`, `braille`,
 and `shade` styles are built in, with an option to follow matching YPM styles.
 

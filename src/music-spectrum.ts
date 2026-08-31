@@ -13,9 +13,17 @@ const EIGHTHS = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'] as
 const SHADES = [' ', '░', '▒', '▓', '█'] as const
 const BRAILLE_LEFT = [0x01, 0x02, 0x04, 0x40] as const
 const BRAILLE_RIGHT = [0x08, 0x10, 0x20, 0x80] as const
+const WIDE_BASE_COLUMNS = 120
+const WIDE_BASE_CELLS = 24
+const MAX_SPECTRUM_CELLS = 48
 
 export function spectrumCells(columns: number): number {
-  if (columns >= 120) return 24
+  if (columns >= WIDE_BASE_COLUMNS) {
+    return Math.min(
+      MAX_SPECTRUM_CELLS,
+      WIDE_BASE_CELLS + Math.floor((columns - WIDE_BASE_COLUMNS) / 2),
+    )
+  }
   if (columns >= 96) return 18
   if (columns >= 80) return 12
   return 0
