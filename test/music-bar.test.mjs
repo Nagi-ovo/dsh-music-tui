@@ -278,6 +278,63 @@ test('a failed initial status keeps the rich bar visible with an offline hint', 
   presenter.dispose()
 })
 
+test('a one-off manual refresh failure preserves an existing playback bar', async () => {
+  let calls = 0
+  let descriptor
+  const presenter = new MusicBarPresenter({}, {
+    set() { return () => {} },
+    registerView(value) {
+      descriptor = value
+      return () => {}
+    },
+  }, {
+    startPolling(receive) {
+      receive(snapshot)
+      return () => {}
+    },
+    startSpectrum() { return () => {} },
+    async status() {
+      calls += 1
+      if (calls === 1) return snapshot
+      throw new YpmError('process', 'offline once')
+    },
+  })
+
+  await presenter.show()
+  await assert.rejects(presenter.show(), error => error?.message === 'offline once')
+
+  assert.deepEqual(presenter.store.getSnapshot().snapshot, snapshot)
+  const tree = createRenderer(60).render(descriptor.component)
+  assert.doesNotMatch(textOf(tree), /YesPlayMusic TUI is not running/u)
+  presenter.dispose()
+})
+
+test('opening one presenter does not open another TUI presenter', async () => {
+  let firstRegistrations = 0
+  let secondRegistrations = 0
+  const controller = {
+    startPolling() { return () => {} },
+    startSpectrum() { return () => {} },
+    async status() { return snapshot },
+  }
+  const status = (register) => ({
+    set() { return () => {} },
+    registerView() {
+      register()
+      return () => {}
+    },
+  })
+  const first = new MusicBarPresenter({}, status(() => { firstRegistrations += 1 }), controller)
+  const second = new MusicBarPresenter({}, status(() => { secondRegistrations += 1 }), controller)
+
+  await first.show()
+
+  assert.equal(firstRegistrations, 1)
+  assert.equal(secondRegistrations, 0)
+  first.dispose()
+  second.dispose()
+})
+
 test('mouse controls expose hover feedback, serialize pending work, and close the bar', async () => {
   let release
   const controls = []

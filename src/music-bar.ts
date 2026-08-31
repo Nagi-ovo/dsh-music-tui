@@ -189,7 +189,7 @@ export class MusicBarPresenter implements MusicDisplay {
       const snapshot = await this.controller.status(signal)
       return { snapshot, displayed }
     } catch (error) {
-      if (displayed) this.receive(undefined)
+      if (displayed && this.store.getSnapshot().snapshot === undefined) this.receive(undefined)
       throw error
     }
   }
