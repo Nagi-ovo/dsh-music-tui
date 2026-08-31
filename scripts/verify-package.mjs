@@ -21,6 +21,7 @@ for (const required of [
   'lib/facet.js',
   'lib/music-command.js',
   'lib/music-bar.js',
+  'lib/music-spectrum.js',
   'lib/music-status.js',
   'lib/cover-art.js',
   'lib/runtime-bridge.js',

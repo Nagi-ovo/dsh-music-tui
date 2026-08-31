@@ -9,8 +9,8 @@ connect to YesPlayMusic's private socket and does not modify either host.
 - Keep the first release limited to `/music` and one `tuiStatus` contribution.
 - Treat `ypm` output as untrusted: validate JSON, strip terminal controls, and
   keep process output bounded.
-- Invoke `ypm` with `execFile` and an argv array. Never construct a shell
-  command from user input.
+- Invoke bounded `ypm` requests with `execFile`; use `spawn` only for its
+  long-lived NDJSON stream. Always pass an argv array with `shell: false`.
 - Do not write music state into DSH session events. DSH's command registry owns
   its normal `command/run` and `command/done` lifecycle records.
 - Every timer, subprocess, status entry, and command registration must be

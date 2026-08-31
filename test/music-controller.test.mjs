@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict'
+import { performance } from 'node:perf_hooks'
 import test from 'node:test'
 import { MusicController } from '../lib/music-controller.js'
 import { createMusicCommand, parseMusicCommand } from '../lib/music-command.js'
 import { YpmError } from '../lib/ypm-client.js'
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+const flush = () => new Promise(resolve => setImmediate(resolve))
 const snapshot = Object.freeze({
   playing: true,
   title: '春日影',
@@ -16,6 +18,181 @@ const snapshot = Object.freeze({
   seekable: true,
   iconStyle: 'unicode',
   source: 'tui',
+})
+const spectrum = Object.freeze({
+  version: 1,
+  style: 'blocks',
+  playing: true,
+  bins: Object.freeze(Array.from({ length: 32 }, (_, index) => index)),
+})
+
+test('spectrum streams forward frames and are aborted by stop, replacement, and dispose', async () => {
+  const streams = []
+  const client = {
+    watchSpectrum: (sink, signal) => new Promise((resolve, reject) => {
+      const stream = { sink, signal }
+      streams.push(stream)
+      signal.addEventListener('abort', () => reject(new YpmError('aborted', 'cancelled')), { once: true })
+    }),
+  }
+  const seen = []
+  const controller = new MusicController(client, 1000)
+
+  const stopFirst = controller.startSpectrum(frame => seen.push(frame))
+  streams[0].sink(spectrum)
+  assert.deepEqual(seen, [spectrum])
+
+  const stopSecond = controller.startSpectrum(frame => seen.push(frame))
+  assert.equal(streams[0].signal.aborted, true)
+  streams[0].sink({ ...spectrum, style: 'stale' })
+  streams[1].sink({ ...spectrum, style: 'braille' })
+  assert.deepEqual(seen.map(frame => frame.style), ['blocks', 'braille'])
+
+  stopFirst()
+  assert.equal(streams[1].signal.aborted, false)
+  stopSecond()
+  assert.equal(streams[1].signal.aborted, true)
+
+  const stopThird = controller.startSpectrum(() => {})
+  controller.dispose()
+  assert.equal(streams[2].signal.aborted, true)
+  stopThird()
+})
+
+test('an unexpected spectrum failure clears the last frame once', async () => {
+  const client = {
+    async watchSpectrum(sink) {
+      sink(spectrum)
+      throw new YpmError('process', 'stream ended')
+    },
+  }
+  const seen = []
+  const controller = new MusicController(client, 1000)
+  controller.startSpectrum(frame => seen.push(frame))
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(seen, [spectrum, undefined])
+  controller.dispose()
+})
+
+test('a clean spectrum EOF also clears the last frame before reconnecting', async () => {
+  const client = {
+    async watchSpectrum(sink) {
+      sink(spectrum)
+    },
+  }
+  const seen = []
+  const controller = new MusicController(client, 1000)
+  controller.startSpectrum(frame => seen.push(frame))
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(seen, [spectrum, undefined])
+  controller.dispose()
+})
+
+test('one-frame spectrum crashes escalate reconnect backoff', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let calls = 0
+  const client = {
+    async watchSpectrum(sink) {
+      calls += 1
+      sink(spectrum)
+      throw new YpmError('process', 'stream ended')
+    },
+  }
+  const controller = new MusicController(client, 1000)
+  controller.startSpectrum(() => {})
+  await flush()
+  assert.equal(calls, 1)
+
+  t.mock.timers.tick(1000)
+  await flush()
+  assert.equal(calls, 2)
+  t.mock.timers.tick(1000)
+  await flush()
+  assert.equal(calls, 2, 'a single frame must not reset the stream health backoff')
+  t.mock.timers.tick(4000)
+  await flush()
+  assert.equal(calls, 3)
+  controller.dispose()
+})
+
+test('a sustained spectrum stream resets reconnect backoff', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let now = 0
+  t.mock.method(performance, 'now', () => now)
+  let calls = 0
+  const client = {
+    watchSpectrum(sink, signal) {
+      calls += 1
+      if (calls <= 2) return Promise.reject(new YpmError('process', 'stream ended'))
+      if (calls === 3) {
+        for (let index = 0; index < 24; index += 1) {
+          now = index * 100
+          sink(spectrum)
+        }
+        return Promise.reject(new YpmError('process', 'stream ended'))
+      }
+      return new Promise((resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new YpmError('aborted', 'cancelled')), {
+          once: true,
+        })
+      })
+    },
+  }
+  const controller = new MusicController(client, 1000)
+  controller.startSpectrum(() => {})
+  await flush()
+  assert.equal(calls, 1)
+
+  t.mock.timers.tick(1000)
+  await flush()
+  assert.equal(calls, 2)
+  t.mock.timers.tick(5000)
+  await flush()
+  assert.equal(calls, 3)
+  t.mock.timers.tick(999)
+  await flush()
+  assert.equal(calls, 3)
+  t.mock.timers.tick(1)
+  await flush()
+  assert.equal(calls, 4, 'a healthy stream should recover with the shortest reconnect delay')
+  controller.dispose()
+})
+
+test('an initial frame burst cannot claim a healthy spectrum stream', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  t.mock.method(performance, 'now', () => 0)
+  let calls = 0
+  const client = {
+    watchSpectrum(sink, signal) {
+      calls += 1
+      if (calls <= 2) return Promise.reject(new YpmError('process', 'stream ended'))
+      if (calls === 3) {
+        for (let index = 0; index < 40; index += 1) sink(spectrum)
+        return Promise.reject(new YpmError('process', 'stream ended'))
+      }
+      return new Promise((resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new YpmError('aborted', 'cancelled')), {
+          once: true,
+        })
+      })
+    },
+  }
+  const controller = new MusicController(client, 1000)
+  controller.startSpectrum(() => {})
+  await flush()
+  t.mock.timers.tick(1000)
+  await flush()
+  t.mock.timers.tick(5000)
+  await flush()
+  assert.equal(calls, 3)
+
+  t.mock.timers.tick(1000)
+  await flush()
+  assert.equal(calls, 3, 'a zero-duration burst must retain the escalated delay')
+  t.mock.timers.tick(14_000)
+  await flush()
+  assert.equal(calls, 4)
+  controller.dispose()
 })
 
 test('polling never overlaps and dispose aborts the active request', async () => {
