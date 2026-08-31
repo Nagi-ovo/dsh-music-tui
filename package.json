@@ -14,12 +14,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dsh-tui-ecosystem/dsh-music-tui.git"
+    "url": "git+https://github.com/Nagi-ovo/dsh-music-tui.git"
   },
   "bugs": {
-    "url": "https://github.com/dsh-tui-ecosystem/dsh-music-tui/issues"
+    "url": "https://github.com/Nagi-ovo/dsh-music-tui/issues"
   },
-  "homepage": "https://github.com/dsh-tui-ecosystem/dsh-music-tui#readme",
+  "homepage": "https://github.com/Nagi-ovo/dsh-music-tui#readme",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
